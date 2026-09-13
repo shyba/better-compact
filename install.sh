@@ -533,6 +533,14 @@ install_cli_wrapper() {
   chmod 755 "$cli_temp"
   mv -f "$cli_temp" "$cli_wrapper"
   say "installed CLI at $cli_wrapper"
+  case ":$PATH:" in
+    *":$cli_bin_dir:"*) ;;
+    *)
+      say "note: $cli_bin_dir is not on your PATH; enable it with:"
+      say "  export PATH=\"$cli_bin_dir:\$PATH\""
+      say "  (add that line to ~/.bashrc or ~/.zshrc to make it permanent)"
+      ;;
+  esac
 }
 
 install_cli_wrapper
