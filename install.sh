@@ -232,7 +232,7 @@ select_opencode() {
       return
     fi
   done
-  fail "OpenCode executable not found on PATH or in a supported install location; set OPENCODE_SAFE_COMPACTION_OPENCODE=/absolute/path/to/opencode"
+  return 1
 }
 
 check_opencode_version() {
@@ -243,10 +243,11 @@ check_opencode_version() {
   minor=${rest%%.*}
   patch=${rest#*.}
   case "$major.$minor.$patch" in
-    *[!0-9.]*) fail "could not parse OpenCode version: $version" ;;
+    *[!0-9.]*) printf 'opencode-safe-compaction: could not parse OpenCode version: %s\n' "$version" >&2; return 1 ;;
   esac
   if [ "$major" -ne 1 ] || [ "$minor" -ne 18 ] || [ "$patch" -lt 4 ]; then
-    fail "OpenCode $version is unsupported; this plugin requires >=1.18.4 <1.19.0"
+    printf 'opencode-safe-compaction: OpenCode %s is unsupported for compaction hooks (requires >=1.18.4 <1.19.0); continuing without it\n' "$version" >&2
+    return 1
   fi
 }
 
@@ -262,8 +263,20 @@ case "$config_dir" in ""|/) fail "config directory is unsafe: $config_dir" ;; es
 reject_insecure_repository "$repository"
 
 git_bin=$(resolve_command git)
-select_opencode
-check_opencode_version
+
+# Runtime probing: OpenCode, Pi and Codex are all valid install targets.
+# OpenCode absence is no longer fatal — pi/codex/sync legs install on their own.
+opencode_ok=0
+if select_opencode; then
+  if check_opencode_version; then
+    opencode_ok=1
+    say "OpenCode detected at $opencode_bin: full plugin install"
+  else
+    say "continuing without OpenCode plugin configuration"
+  fi
+else
+  say "OpenCode not found on this host; continuing with pi/codex/sync-only install"
+fi
 
 temporary_root=${TMPDIR:-/tmp}
 case "$temporary_root" in /*) ;; *) fail "temporary directory must be absolute: $temporary_root" ;; esac
@@ -411,6 +424,7 @@ else
   fi
 fi
 
+if [ "$opencode_ok" -eq 1 ]; then
 OPENCODE_SAFE_COMPACTION_STATE_FILE=$state_file \
 OPENCODE_SAFE_COMPACTION_CONFIG_DIR=$config_dir \
 OPENCODE_SAFE_COMPACTION_DIR=$install_dir \
@@ -420,7 +434,11 @@ OPENCODE_SAFE_COMPACTION_VERIFY_DIR=$verification_config_dir \
   "$bun_bin" "$install_dir/scripts/configure.ts"
 [ -r "$verification_config_dir/model" ] || fail "plugin configuration did not report its effective model"
 IFS= read -r model < "$verification_config_dir/model" || fail "could not read the effective compaction model"
+else
+  say "skipping OpenCode plugin configuration (OpenCode not installed)"
+fi
 
+if [ "$opencode_ok" -eq 1 ]; then
 say "verifying the installed plugin in isolation"
 mkdir -p \
   "$transaction_dir/home" \
@@ -486,6 +504,7 @@ OPENCODE_SAFE_COMPACTION_DIR=$install_dir \
 OPENCODE_SAFE_COMPACTION_MODEL=$model \
 OPENCODE_SAFE_COMPACTION_MODEL_EXPLICIT=$model_explicit \
   "$bun_bin" "$install_dir/scripts/configure.ts"
+fi
 transaction_active=0
 
 install_cli_wrapper() {
@@ -518,5 +537,35 @@ install_cli_wrapper() {
 
 install_cli_wrapper
 
-say "installed successfully"
-say "restart any running OpenCode server before using the plugin"
+# --- pi leg (extension shim pointing at the installed entry point) ---
+if [ -d "$HOME/.pi/agent" ]; then
+  pi_ext="$HOME/.pi/agent/extensions/safe-compaction.ts"
+  mkdir -p "$HOME/.pi/agent/extensions"
+  printf 'export { default } from "%s/src/pi.ts";\n' "$install_dir" > "$pi_ext.tmp.$$"
+  mv -f "$pi_ext.tmp.$$" "$pi_ext"
+  say "pi extension installed at $pi_ext"
+  say "restart any running pi session to load it"
+else
+  say "no ~/.pi/agent directory; skipping pi extension"
+fi
+
+# --- codex leg: no plugin API exists; sync covers ~/.codex/sessions ---
+[ -d "$HOME/.codex" ] && say "codex detected: its sessions are covered by the sync daemon (codex-jsonl source); nothing else to install"
+
+# --- sync daemon (runtime-independent) ---
+if [ -n "${OPENCODE_SAFE_COMPACTION_SYNC_URL:-}" ] || [ -n "${OPENCODE_SAFE_COMPACTION_SYNC_SETUP_ARGS:-}" ]; then
+  say "installing the sync daemon"
+  # shellcheck disable=SC2086
+  "$bun_bin" scripts/cli.ts sync setup ${OPENCODE_SAFE_COMPACTION_SYNC_SETUP_ARGS:-} || say "sync setup failed; run: bun scripts/cli.ts sync setup"
+  "$bun_bin" scripts/cli.ts sync install || say "sync install failed; run: bun scripts/cli.ts sync install"
+else
+  say "sync not configured; to feed sessions into the corpus later run:"
+  say "  bun scripts/cli.ts sync setup --url <session-center-url> && bun scripts/cli.ts sync install"
+fi
+
+if [ "$opencode_ok" -eq 1 ]; then
+  say "installed successfully"
+  say "restart any running OpenCode server before using the plugin"
+else
+  say "installed successfully (pi/codex/sync targets; no OpenCode on this host)"
+fi
