@@ -31,6 +31,14 @@ export type VccPiRecallIndex = {
   complete: boolean
   reason: "page_limit" | "duplicate_message_id" | "unsupported_record" | null
   entries: VccPiRecallEntry[]
+  /** Coverage of the active branch: recall serves the most recent window of a
+   *  long session instead of refusing, so callers can see what they are missing. */
+  branch_entries: number
+  indexed_entries: number
+  truncated: boolean
+  /** Recall-eligible entries dropped for an unusable identity or a duplicate id.
+   *  They must not disable recall for the whole session. */
+  skipped_entries: number
 }
 
 export type VccPiRecallFailure =
@@ -61,10 +69,16 @@ export function vccPiLineageId(session_id: string, branch: readonly SessionEntry
 export function buildVccPiRecallIndex(input: { session_id: string; branch: readonly SessionEntry[] }): VccPiRecallIndex {
   const lineage_id = vccPiLineageId(input.session_id, input.branch)
   const seen = new Set<string>()
-  const complete = input.branch.length <= VCC_PI_RECALL_MAX_ENTRIES
+  // Recall is scoped to the recent active branch: a session longer than the
+  // window is indexed from the tail (where the live context is) rather than
+  // refusing every call with "page_limit", which made the tool unusable on
+  // exactly the long sessions it exists for.
+  const truncated = input.branch.length > VCC_PI_RECALL_MAX_ENTRIES
+  const window = truncated ? input.branch.slice(-VCC_PI_RECALL_MAX_ENTRIES) : input.branch
+  const complete = !truncated
   const hasInvalidAuthoritativeEntry = input.branch.some((entry) => isRecallEntry(entry) && !validIdentity(entry.id))
   const reason = !complete ? "page_limit" : hasInvalidAuthoritativeEntry ? "unsupported_record" : null
-  const entries = input.branch.slice(0, VCC_PI_RECALL_MAX_ENTRIES).flatMap((entry) => {
+  const entries = window.flatMap((entry) => {
     if (!isRecallEntry(entry)) return []
     if (!validIdentity(entry.id)) return []
     if (seen.has(entry.id)) return []
@@ -122,7 +136,18 @@ export function buildVccPiRecallIndex(input: { session_id: string; branch: reado
     }
   })
   const duplicate = input.branch.some((entry, index) => input.branch.findIndex((candidate) => candidate.id === entry.id) !== index)
-  return { session_id: input.session_id, lineage_id, complete: complete && !duplicate && !hasInvalidAuthoritativeEntry, reason: duplicate ? "duplicate_message_id" : reason, entries }
+  const recallEligible = window.filter((entry) => isRecallEntry(entry)).length
+  return {
+    session_id: input.session_id,
+    lineage_id,
+    complete: complete && !duplicate && !hasInvalidAuthoritativeEntry,
+    reason: duplicate ? "duplicate_message_id" : reason,
+    entries,
+    branch_entries: input.branch.length,
+    indexed_entries: entries.length,
+    truncated,
+    skipped_entries: Math.max(0, recallEligible - entries.length),
+  }
 }
 
 export function resolveVccPiHandle(input: {
@@ -163,9 +188,12 @@ export function discoverVccPiHandles(input: {
   const tokens = query.split(/\s+/u).filter(Boolean)
   const page = Number.isSafeInteger(input.page) && input.page! > 0 ? input.page! : 1
   const max_results = boundedResults(input.max_results)
+  // Rank by how many query terms an entry covers instead of demanding all of
+  // them: multi-word recall queries are paraphrases, and requiring every term
+  // in one redacted payload returned an empty page for ordinary questions.
   const ranked = input.entries
     .map((entry) => ({ entry, score: tokens.reduce((total, token) => total + (entry.searchable_text.includes(token) ? 1 : 0), 0) }))
-    .filter((candidate) => tokens.length > 0 && candidate.score === tokens.length)
+    .filter((candidate) => tokens.length > 0 && candidate.score > 0)
     .sort((left, right) => right.score - left.score || compareCodePoints(left.entry.entry_id, right.entry.entry_id))
   const start = (page - 1) * max_results
   return {

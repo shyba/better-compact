@@ -42,7 +42,7 @@ export default function piExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "vcc_recall",
     label: "VCC Pi recall",
-    description: "Recall exact, source-scoped items from the active Pi session branch. Results are bounded and redacted; archive and all-session lookup are unavailable in Pi V1.",
+    description: "Recall exact, source-scoped items from the active Pi session branch. Results are bounded and redacted; archive and all-session lookup are unavailable in Pi V1. Long sessions are indexed from their most recent entries: the response reports how much of the branch is covered.",
     promptSnippet: "Recall bounded source-backed items from this Pi branch",
     parameters: Type.Object({
       handle: Type.Optional(Type.String({ maxLength: 512 })),
@@ -62,15 +62,17 @@ export default function piExtension(pi: ExtensionAPI) {
       const sessionID = ctx.sessionManager.getSessionId()
       if (!sessionID) return piRecallToolResponse(vccPiRecallToolResult("unavailable", { reason: "session_unavailable" }, max_bytes))
       const index = buildVccPiRecallIndex({ session_id: sessionID, branch: ctx.sessionManager.getBranch() })
-      if (!index.complete) return piRecallToolResponse(vccPiRecallToolResult("incomplete", { reason: index.reason ?? "unsupported_record", scope: "active_branch" }, max_bytes))
-      if (!index.entries.length) return piRecallToolResponse(vccPiRecallToolResult("unavailable", { reason: "no_canonical_entries", scope: "active_branch" }, max_bytes))
+      // Coverage is reported, never a hard refusal: a branch past the window is
+      // served from its most recent entries (see vcc-pi-recall.ts).
+      const coverage = { branch_entries: index.branch_entries, indexed_entries: index.indexed_entries, truncated: index.truncated, ...(index.skipped_entries ? { skipped_entries: index.skipped_entries } : {}), ...(index.truncated ? { coverage_reason: "recent_window" } : {}) }
+      if (!index.entries.length) return piRecallToolResponse(vccPiRecallToolResult("unavailable", { reason: "no_canonical_entries", scope: "active_branch", ...coverage }, max_bytes))
       if (params.handle !== undefined) {
         const resolvedHandle = resolveVccPiHandle({ handle: params.handle, session_id: sessionID, lineage_id: index.lineage_id, entries: index.entries, max_bytes })
-        if (!resolvedHandle.ok) return piRecallToolResponse(vccPiRecallToolResult("unavailable", { reason: resolvedHandle.reason }, max_bytes))
+        if (!resolvedHandle.ok) return piRecallToolResponse(vccPiRecallToolResult("unavailable", { reason: resolvedHandle.reason, ...coverage }, max_bytes))
         const rendered = renderVccPiRecallEntry(resolvedHandle.entry, max_bytes)
         return piRecallToolResponse(rendered === undefined
-          ? vccPiRecallToolResult("unavailable", { reason: "oversized" }, max_bytes)
-          : vccPiRecallToolResult("ok", { operation: "handle", item: JSON.parse(rendered) }, max_bytes))
+          ? vccPiRecallToolResult("unavailable", { reason: "oversized", ...coverage }, max_bytes)
+          : vccPiRecallToolResult("ok", { operation: "handle", item: JSON.parse(rendered), ...coverage }, max_bytes))
       }
       if (params.expand !== undefined) {
         const item_bytes = Math.max(256, Math.floor(max_bytes / Math.max(1, params.expand.length)))
@@ -80,13 +82,14 @@ export default function piExtension(pi: ExtensionAPI) {
           const rendered = renderVccPiRecallEntry(resolvedHandle.entry, item_bytes)
           return rendered === undefined ? { handle, status: "unavailable", reason: "oversized" } : { handle, status: "ok", item: JSON.parse(rendered) }
         })
-        return piRecallToolResponse(vccPiRecallToolResult("ok", { operation: "expand", items }, max_bytes))
+        return piRecallToolResponse(vccPiRecallToolResult("ok", { operation: "expand", items, ...coverage }, max_bytes))
       }
       const query = params.query!.trim()
       if (!query) return piRecallToolResponse(vccPiRecallToolResult("error", { reason: "empty_query" }, max_bytes))
       const discovered = discoverVccPiHandles({ query, entries: index.entries, ...(params.page === undefined ? {} : { page: params.page }), max_results: params.max_results ?? VCC_PI_RECALL_DEFAULT_MAX_RESULTS })
       return piRecallToolResponse(vccPiRecallToolResult("ok", {
         operation: "discover",
+        ...coverage,
         page: discovered.page,
         total_pages: discovered.total_pages,
         total: discovered.total,

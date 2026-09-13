@@ -1018,6 +1018,15 @@ async function directory() {
   return value
 }
 
+let isolatedAgentDirectory: string | undefined
+function isolatedAgentDir() {
+  if (!isolatedAgentDirectory) {
+    isolatedAgentDirectory = path.join(tmpdir(), `pi-agent-isolated-${process.pid}`)
+    temporary.push(isolatedAgentDirectory)
+  }
+  return isolatedAgentDirectory
+}
+
 function managedSource(install: string) {
   return path.join(install, "runtime")
 }
@@ -1222,9 +1231,15 @@ async function executable(file: string, text: string) {
 }
 
 async function command(argv: string[], env = process.env, cwd = process.cwd(), input?: string) {
+  // The pi leg of the installer registers its checkout with the Pi CLI, which
+  // resolves the agent directory without honouring a test HOME. Pin
+  // PI_CODING_AGENT_DIR to a throwaway directory so the suite can never write
+  // the developer's real ~/.pi/agent/settings.json. A test that sets it keeps
+  // control.
+  const isolated = env.PI_CODING_AGENT_DIR ? env : { ...env, PI_CODING_AGENT_DIR: isolatedAgentDir() }
   const child = Bun.spawn(argv, {
     cwd,
-    env,
+    env: isolated,
     ...(input === undefined ? {} : { stdin: new Blob([input]) }),
     stdout: "pipe",
     stderr: "pipe",

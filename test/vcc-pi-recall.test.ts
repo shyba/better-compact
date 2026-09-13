@@ -103,6 +103,71 @@ describe("Pi V1 exact recall resolver", () => {
     expect(result.metadata).not.toHaveProperty("item")
   })
 
+  test("serves recall from the recent window of an over-capacity branch instead of refusing", async () => {
+    // Regression: a branch longer than the index window used to answer every
+    // call with status "incomplete"/reason "page_limit" and no items, so recall
+    // was unusable in exactly the long sessions it exists for.
+    const filler = Array.from({ length: 4_100 }, (_, index) => message(`filler-${index}`, `filler entry ${index}`))
+    const branch = [...filler, message("recent-deploy", "the deploy decision was to roll back"), message("recent-note", "follow-up note", "recent-deploy")]
+    const index = buildVccPiRecallIndex({ session_id: "pi-session", branch })
+    expect(index.truncated).toBe(true)
+    expect(index.branch_entries).toBe(4_102)
+    expect(index.indexed_entries).toBeLessThanOrEqual(4_096)
+    // the newest entries are the ones kept
+    expect(index.entries.some((entry) => entry.entry_id === "recent-deploy")).toBe(true)
+    expect(index.entries.some((entry) => entry.entry_id === "filler-0")).toBe(false)
+    const page = discoverVccPiHandles({ query: "deploy decision", entries: index.entries })
+    // the full match ranks first; the note is reachable through its parent link
+    expect(page.entries.map((entry) => entry.entry_id)).toEqual(["recent-deploy", "recent-note"])
+  })
+
+  test("reports coverage in the tool response for a truncated branch", async () => {
+    const filler = Array.from({ length: 4_100 }, (_, index) => message(`filler-${index}`, `filler ${index}`))
+    const branch = [...filler, message("recent-deploy", "deploy decision recorded")]
+    const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }>()
+    const api = { on() {}, registerCommand() {}, registerTool(tool: { name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }) { tools.set(tool.name, tool) } } as unknown as ExtensionAPI
+    piExtension(api)
+    const context = { sessionManager: { getSessionId: () => "pi-session", getBranch: () => branch } }
+    const result = await tools.get("vcc_recall")!.execute("call-1", { query: "deploy decision" }, undefined, undefined, context)
+    const body = JSON.parse(result.content[0]!.text) as { status: string; truncated: boolean; branch_entries: number; indexed_entries: number; total: number; items: Array<{ entry_id: string }> }
+    expect(body.status).toBe("ok")
+    expect(body.truncated).toBe(true)
+    expect(body.branch_entries).toBe(4_101)
+    expect(body.total).toBe(1)
+    expect(body.items[0]!.entry_id).toBe("recent-deploy")
+  })
+
+  test("ranks partial query-term coverage instead of requiring every term", () => {
+    const index = buildVccPiRecallIndex({ session_id: "pi-session", branch: [message("entry-a", "deploy decision alpha"), message("entry-b", "deploy beta"), message("entry-c", "unrelated")] })
+    const page = discoverVccPiHandles({ query: "deploy decision", entries: index.entries })
+    // entry-b matches only one term and is still reachable, after the full match
+    expect(page.entries.map((entry) => entry.entry_id)).toEqual(["entry-a", "entry-b"])
+    expect(page.total).toBe(2)
+  })
+
+  test("keeps recall usable when some entries have an unusable identity", async () => {
+    // Regression: a single recall-eligible entry with an unusable id (numeric,
+    // or containing a separator) used to mark the whole session incomplete, so
+    // ordinary sessions answered every call with an error and no items.
+    const branch = [message("entry-valid", "the deploy decision was to roll back"), message("12345", "numeric id entry"), { ...message("bad:id", "separator id entry") }]
+    const index = buildVccPiRecallIndex({ session_id: "pi-session", branch })
+    expect(index.complete).toBe(false)
+    expect(index.reason).toBe("unsupported_record")
+    expect(index.entries.map((entry) => entry.entry_id)).toEqual(["entry-valid"])
+    expect(index.skipped_entries).toBe(2)
+
+    const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }>()
+    const api = { on() {}, registerCommand() {}, registerTool(tool: { name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }) { tools.set(tool.name, tool) } } as unknown as ExtensionAPI
+    piExtension(api)
+    const context = { sessionManager: { getSessionId: () => "pi-session", getBranch: () => branch } }
+    const result = await tools.get("vcc_recall")!.execute("call-1", { query: "deploy decision" }, undefined, undefined, context)
+    const body = JSON.parse(result.content[0]!.text) as { status: string; total: number; items: Array<{ entry_id: string }>; skipped_entries: number }
+    expect(body.status).toBe("ok")
+    expect(body.total).toBe(1)
+    expect(body.items[0]!.entry_id).toBe("entry-valid")
+    expect(body.skipped_entries).toBe(2)
+  })
+
   test("reports duplicate active-branch IDs as incomplete", () => {
     const index = buildVccPiRecallIndex({ session_id: "pi-session", branch: [message("entry-a", "one"), message("entry-a", "two")] })
     expect(index).toMatchObject({ complete: false, reason: "duplicate_message_id" })
