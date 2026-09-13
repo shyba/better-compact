@@ -16,7 +16,11 @@ import { discoverS3JsonlSnapshot, hashS3FileSnapshot, planS3Upload, uploadS3File
 import { verifySync } from "./sync-verify.js"
 import { inspectCli, cliHelp } from "./cli-help.js"
 
-const installDir = path.resolve(process.env.OPENCODE_SAFE_COMPACTION_DIR ?? path.join(process.env.HOME ?? ".", ".local/share/opencode/plugins/safe-compaction"))
+const homeDir = process.env.HOME ?? "."
+const defaultInstallDir = path.join(homeDir, ".local/share/better-compact")
+const legacyInstallDir = path.join(homeDir, ".local/share/opencode/plugins/safe-compaction")
+const resolvedInstallDir = existsSync(defaultInstallDir) || !existsSync(legacyInstallDir) ? defaultInstallDir : legacyInstallDir
+const installDir = path.resolve(process.env.OPENCODE_SAFE_COMPACTION_DIR ?? resolvedInstallDir)
 const configDir = path.resolve(process.env.OPENCODE_SAFE_COMPACTION_CONFIG_DIR ?? process.env.OPENCODE_CONFIG_DIR ?? path.join(process.env.XDG_CONFIG_HOME ?? path.join(process.env.HOME ?? ".", ".config"), "opencode"))
 const databasePath = path.resolve(process.env.OPENCODE_DB ?? path.join(process.env.XDG_DATA_HOME ?? path.join(process.env.HOME ?? ".", ".local/share"), "opencode", "opencode.db"))
 const maxUploadBatchesPerSource = 8

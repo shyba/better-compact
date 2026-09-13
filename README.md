@@ -14,7 +14,8 @@ Per-runtime behavior:
 |---|---|
 | OpenCode `>=1.18.4 <1.19.0` | full plugin (compaction hooks + TUI selector), as before |
 | OpenCode absent or unsupported version | skipped gracefully — no failure |
-| pi (`~/.pi/agent` present) | extension shim at `~/.pi/agent/extensions/safe-compaction.ts` |
+| pi on PATH | `pi install <install-dir>` — registers both entry points (`src/pi.ts`, `src/cat.ts`) from the package manifest; maintained with `pi update --extensions` |
+| `~/.pi/agent` present but no pi CLI | fallback shims written into `~/.pi/agent/extensions/` |
 | codex (`~/.codex` present) | sessions covered by the sync daemon (codex-jsonl source); codex has no plugin API |
 | always | `better-compact` CLI wrapper; sync daemon if sync env is set |
 
@@ -87,7 +88,7 @@ After installation, run `/compaction-model` inside the OpenCode TUI (or choose *
 
 In **Follow selected model** mode, automatic compaction uses the model on the latest user turn and manual `/compact` uses the model selected when the command runs. Changing the ordinary OpenCode model therefore applies to the next compaction without another plugin setting change.
 
-The installer clones the `default` branch over HTTPS to `$HOME/.local/share/opencode/plugins/safe-compaction`, adds the absolute source tuple to both the global server and TUI configurations, preserves JSONC comments and unrelated settings, and verifies the exact runtime module and configuration hook before writing anything. The server tuple carries all plugin options; the TUI tuple carries only the synchronized model policy. If exactly one server entry points to a different local safe-compaction checkout, the installer imports that module to verify the expected plugin identity, preserves its validated tuple options, and replaces only its source string with the managed path. Unverifiable lookalikes and duplicate entries are refused. It first loads a generated minimal configuration containing only the exact installed tuple, then checks compatibility with the real target configuration. Fresh installs must retain all three exact numeric thresholds. For a pre-existing partial tuple, values intentionally inherited from earlier configuration or plugin hooks must still satisfy the plugin's type and safety bounds; explicit tuple values remain exact. Both checks use a temporary HOME and XDG directories; inherited `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`, and pure mode are neutralized. OpenCode 1.18.x reports the pre-plugin object from `opencode debug config`, so the installer verifies hook activation with its direct runtime preflight and treats a debug result that omits hook fields as valid; hosts that expose post-hook fields still receive the threshold/override check. An unrelated plugin therefore cannot impersonate successful activation. It is idempotent: rerunning it fast-forwards a clean checkout and does not duplicate either tuple. Configuration edits are serialized with a directory lock and committed by atomic rename as one rollback-safe transaction. When an existing file changes successfully, a timestamped `*.safe-compaction-backup-*` copy remains beside it.
+The installer clones the `default` branch over HTTPS to `$HOME/.local/share/better-compact` (a pre-rename checkout at `~/.local/share/opencode/plugins/safe-compaction` is adopted in place), adds the absolute source tuple to both the global server and TUI configurations, preserves JSONC comments and unrelated settings, and verifies the exact runtime module and configuration hook before writing anything. The server tuple carries all plugin options; the TUI tuple carries only the synchronized model policy. If exactly one server entry points to a different local safe-compaction checkout, the installer imports that module to verify the expected plugin identity, preserves its validated tuple options, and replaces only its source string with the managed path. Unverifiable lookalikes and duplicate entries are refused. It first loads a generated minimal configuration containing only the exact installed tuple, then checks compatibility with the real target configuration. Fresh installs must retain all three exact numeric thresholds. For a pre-existing partial tuple, values intentionally inherited from earlier configuration or plugin hooks must still satisfy the plugin's type and safety bounds; explicit tuple values remain exact. Both checks use a temporary HOME and XDG directories; inherited `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`, and pure mode are neutralized. OpenCode 1.18.x reports the pre-plugin object from `opencode debug config`, so the installer verifies hook activation with its direct runtime preflight and treats a debug result that omits hook fields as valid; hosts that expose post-hook fields still receive the threshold/override check. An unrelated plugin therefore cannot impersonate successful activation. It is idempotent: rerunning it fast-forwards a clean checkout and does not duplicate either tuple. Configuration edits are serialized with a directory lock and committed by atomic rename as one rollback-safe transaction. When an existing file changes successfully, a timestamped `*.safe-compaction-backup-*` copy remains beside it.
 
 The shortest command follows the mutable `default` branch. For a security-sensitive server, pin the reviewed installer and checkout to the same lowercase 40-character commit:
 
@@ -232,8 +233,8 @@ During compaction, the model receives the bounded ledger and a single-response J
 Clone this repository to a stable absolute path:
 
 ```sh
-install_dir="$HOME/.local/share/opencode/plugins/safe-compaction"
-git clone --branch default https://github.com/shyba/opencode-better-compact-plugin.git "$install_dir"
+install_dir="$HOME/.local/share/better-compact"
+git clone --branch default https://github.com/shyba/better-compact.git "$install_dir"
 ```
 
 Add the tuple below to the global server configuration's existing `plugin` array, replacing `USER` with the account's actual home directory. The plugin path must be absolute; environment variables are not expanded inside JSON. JSONC comments are allowed. Keep other plugin entries intact.
@@ -242,7 +243,7 @@ Add the tuple below to the global server configuration's existing `plugin` array
 {
   "plugin": [
     [
-      "/home/USER/.local/share/opencode/plugins/safe-compaction/runtime",
+      "/home/USER/.local/share/better-compact/runtime",
       {
         "model": "opencode-go/glm-5.2",
         "tail_turns": 4,
@@ -266,7 +267,7 @@ OpenCode loads TUI plugins from its separate global `tui.jsonc`. Add the same ru
 {
   "plugin": [
     [
-      "/home/USER/.local/share/opencode/plugins/safe-compaction/runtime",
+      "/home/USER/.local/share/better-compact/runtime",
       {
         "model": "opencode-go/glm-5.2"
       }
@@ -350,7 +351,7 @@ The package ships two pi extension entry points alongside the OpenCode V1 plugin
 Install the repository as a Pi package to load both extensions automatically:
 
 ```sh
-pi install git:github.com/shyba/opencode-better-compact-plugin
+pi install git:github.com/shyba/better-compact
 ```
 
 The unpinned Git package follows the repository's default branch and can be refreshed with `pi update --extensions`. The package manifest points Pi at the TypeScript sources, so this works from a Git checkout without a checked-in `dist/` directory. For a one-off or source checkout, load either entry point explicitly with `pi -e /abs/path/to/src/pi.ts` or `pi -e /abs/path/to/src/cat.ts`. Built `dist/pi.js` and `dist/cat.js` entry points are also available after `bun run build`.

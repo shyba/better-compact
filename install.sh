@@ -2,9 +2,19 @@
 
 set -eu
 
-repository=${OPENCODE_SAFE_COMPACTION_REPO:-https://github.com/shyba/opencode-better-compact-plugin.git}
+repository=${OPENCODE_SAFE_COMPACTION_REPO:-https://github.com/shyba/better-compact.git}
 ref=${OPENCODE_SAFE_COMPACTION_REF:-default}
-install_dir=${OPENCODE_SAFE_COMPACTION_DIR:-${HOME:?HOME must be set}/.local/share/opencode/plugins/safe-compaction}
+install_dir=${OPENCODE_SAFE_COMPACTION_DIR:-}
+legacy_adopted=0
+if [ -z "$install_dir" ]; then
+  install_dir=${HOME:?HOME must be set}/.local/share/better-compact
+  legacy_install_dir=${HOME}/.local/share/opencode/plugins/safe-compaction
+  # adopt a pre-rename checkout instead of installing a second copy
+  if [ ! -e "$install_dir" ] && [ -d "$legacy_install_dir/.git" ]; then
+    install_dir=$legacy_install_dir
+    legacy_adopted=1
+  fi
+fi
 config_dir=${OPENCODE_SAFE_COMPACTION_CONFIG_DIR:-${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}}
 if [ "${OPENCODE_SAFE_COMPACTION_MODEL+x}" = x ]; then
   model=$OPENCODE_SAFE_COMPACTION_MODEL
@@ -58,7 +68,7 @@ canonical_repository() {
     ssh://git@github.com/*) printf 'github.com/%s\n' "${1#ssh://git@github.com/}" ;;
     https://github.com/*) printf 'github.com/%s\n' "${1#https://github.com/}" ;;
     *) printf '%s\n' "$1" ;;
-  esac | sed 's#/*$##; s#\.git$##'
+  esac | sed 's#/*$##; s#\.git$##' | sed 's#^github\.com/shyba/opencode-better-compact-plugin$#github.com/shyba/better-compact#'
 }
 
 reject_insecure_repository() {
@@ -195,9 +205,20 @@ select_bun() {
 }
 
 select_opencode() {
+  # An explicitly requested OpenCode binary is authoritative: if it is missing,
+  # that is a hard failure, never a silent "not installed" probe result.
   if [ "${OPENCODE_SAFE_COMPACTION_OPENCODE+x}" = x ]; then
-    opencode_bin=$(resolve_command "$opencode_command")
-    return
+    case "$opencode_command" in
+      */*)
+        [ -x "$opencode_command" ] || fail "executable not found: $opencode_command"
+        opencode_bin=$opencode_command
+        ;;
+      *)
+        command -v "$opencode_command" >/dev/null 2>&1 || fail "required command not found: $opencode_command"
+        opencode_bin=$(command -v "$opencode_command")
+        ;;
+    esac
+    return 0
   fi
   if command -v opencode >/dev/null 2>&1; then
     opencode_bin=$(command -v opencode)
@@ -263,6 +284,10 @@ case "$config_dir" in ""|/) fail "config directory is unsafe: $config_dir" ;; es
 reject_insecure_repository "$repository"
 
 git_bin=$(resolve_command git)
+
+if [ "$legacy_adopted" -eq 1 ]; then
+  say "adopted the existing checkout at $install_dir (pre-rename path; set OPENCODE_SAFE_COMPACTION_DIR to relocate)"
+fi
 
 # Runtime probing: OpenCode, Pi and Codex are all valid install targets.
 # OpenCode absence is no longer fatal — pi/codex/sync legs install on their own.
@@ -391,6 +416,10 @@ if [ -e "$install_dir" ]; then
   reject_insecure_repository "$actual_repository"
   [ "$(canonical_repository "$actual_repository")" = "$(canonical_repository "$repository")" ] ||
     fail "existing checkout origin does not match $repository"
+  if [ "$actual_repository" != "$repository" ]; then
+    "$git_bin" -C "$install_dir" remote set-url origin "$repository"
+    say "updated the checkout origin from $actual_repository to $repository"
+  fi
   [ -z "$("$git_bin" -C "$install_dir" status --porcelain --untracked-files=normal)" ] ||
     fail "existing checkout has local changes; commit, stash, or remove them before updating"
   previous_branch=$("$git_bin" -C "$install_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
@@ -522,12 +551,14 @@ install_cli_wrapper() {
   fi
   cli_wrapper=$cli_bin_dir/better-compact
   cli_temp=$cli_wrapper.tmp.$$
-  fallback_install_dir=$HOME/.local/share/opencode/plugins/safe-compaction
+  fallback_install_dir=$HOME/.local/share/better-compact
+  legacy_fallback_install_dir=$HOME/.local/share/opencode/plugins/safe-compaction
   printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
     "cli=\"$install_dir/scripts/cli.ts\"" \
     "if [ ! -f \"\$cli\" ] && [ -f \"$fallback_install_dir/scripts/cli.ts\" ]; then cli=\"$fallback_install_dir/scripts/cli.ts\"; fi" \
+    "if [ ! -f \"\$cli\" ] && [ -f \"$legacy_fallback_install_dir/scripts/cli.ts\" ]; then cli=\"$legacy_fallback_install_dir/scripts/cli.ts\"; fi" \
     "if [ ! -f \"\$cli\" ]; then echo \"better-compact: installed CLI source is missing; rerun the installer\" >&2; exit 1; fi" \
     "exec \"$persistent_bun\" \"\$cli\" \"\$@\"" > "$cli_temp"
   chmod 755 "$cli_temp"
@@ -545,16 +576,46 @@ install_cli_wrapper() {
 
 install_cli_wrapper
 
-# --- pi leg (extension shim pointing at the installed entry point) ---
-if [ -d "$HOME/.pi/agent" ]; then
-  pi_ext="$HOME/.pi/agent/extensions/safe-compaction.ts"
-  mkdir -p "$HOME/.pi/agent/extensions"
-  printf 'export { default } from "%s/src/pi.ts";\n' "$install_dir" > "$pi_ext.tmp.$$"
-  mv -f "$pi_ext.tmp.$$" "$pi_ext"
-  say "pi extension installed at $pi_ext"
-  say "restart any running pi session to load it"
+# --- pi leg ---
+# Preferred: pi's own package installer. It resolves the host peers, registers
+# both entry points from the package manifest (src/pi.ts, src/cat.ts) and stays
+# maintainable with `pi update --extensions`.
+pi_bin=
+if [ -n "${OPENCODE_SAFE_COMPACTION_PI:-}" ]; then
+  pi_bin=${OPENCODE_SAFE_COMPACTION_PI}
+  [ -x "$pi_bin" ] || pi_bin=$(command -v "$OPENCODE_SAFE_COMPACTION_PI" 2>/dev/null || true)
+elif command -v pi >/dev/null 2>&1; then
+  pi_bin=$(command -v pi)
 else
-  say "no ~/.pi/agent directory; skipping pi extension"
+  for candidate in "$HOME/.bun/bin/pi" "$HOME/.local/bin/pi" /usr/local/bin/pi; do
+    if [ -x "$candidate" ]; then pi_bin=$candidate; break; fi
+  done
+fi
+pi_ext_dir=$HOME/.pi/agent/extensions
+legacy_pi_shim=$pi_ext_dir/safe-compaction.ts
+if [ -n "$pi_bin" ] && [ -x "$pi_bin" ]; then
+  if "$pi_bin" install "$install_dir"; then
+    say "installed as a pi package (entry points: src/pi.ts, src/cat.ts)"
+    if [ -f "$legacy_pi_shim" ]; then
+      rm -f "$legacy_pi_shim"
+      say "removed the legacy hand-written shim so the extension is not loaded twice"
+    fi
+    say "restart any running pi session to load it"
+  else
+    say "pi package install failed; run it yourself: pi install $install_dir"
+  fi
+elif [ -d "$HOME/.pi/agent" ]; then
+  mkdir -p "$pi_ext_dir"
+  for pi_entry in pi cat; do
+    pi_shim=$pi_ext_dir/safe-compaction-$pi_entry.ts
+    printf 'export { default } from "%s/src/%s.ts";\n' "$install_dir" "$pi_entry" > "$pi_shim.tmp.$$"
+    mv -f "$pi_shim.tmp.$$" "$pi_shim"
+  done
+  rm -f "$legacy_pi_shim"
+  say "pi CLI not found; installed fallback shims in $pi_ext_dir"
+  say "restart any running pi session to load them"
+else
+  say "no pi CLI and no ~/.pi/agent directory; skipping the pi target"
 fi
 
 # --- codex leg: no plugin API exists; sync covers ~/.codex/sessions ---

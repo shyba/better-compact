@@ -8,7 +8,7 @@
 #   curl -fsSL <raw>/install-sync-only.sh | sh -s -- --url <session-center URL> [--token <bearer>]
 #   # or set OPENCODE_SAFE_COMPACTION_SYNC_URL / OPENCODE_SAFE_COMPACTION_TOKEN and run: sh install-sync-only.sh
 #
-# Env: OPENCODE_SAFE_COMPACTION_DIR (install dir, default ~/.local/share/opencode/plugins/safe-compaction)
+# Env: OPENCODE_SAFE_COMPACTION_DIR (install dir, default ~/.local/share/better-compact)
 #      OPENCODE_SAFE_COMPACTION_REF (branch/commit, default 'default')
 
 set -u
@@ -24,14 +24,20 @@ for arg in "$@"; do
   esac
 done
 
-repository=${OPENCODE_SAFE_COMPACTION_REPO:-https://github.com/shyba/opencode-better-compact-plugin.git}
+repository=${OPENCODE_SAFE_COMPACTION_REPO:-https://github.com/shyba/better-compact.git}
 ref=${OPENCODE_SAFE_COMPACTION_REF:-default}
-install_dir=${OPENCODE_SAFE_COMPACTION_DIR:-${HOME:?HOME must be set}/.local/share/opencode/plugins/safe-compaction}
+install_dir=${OPENCODE_SAFE_COMPACTION_DIR:-}
+if [ -z "$install_dir" ]; then
+  install_dir=${HOME:?HOME must be set}/.local/share/better-compact
+  legacy_install_dir=${HOME}/.local/share/opencode/plugins/safe-compaction
+  if [ ! -e "$install_dir" ] && [ -d "$legacy_install_dir/.git" ]; then install_dir=$legacy_install_dir; fi
+fi
 
 case "$install_dir" in /*) ;; *) fail "install directory must be absolute: $install_dir" ;; esac
 [ "$install_dir" != "${HOME%/}" ] || fail "install directory is unsafe: $install_dir"
 
 command -v git >/dev/null 2>&1 || fail "required command not found: git"
+git_bin=$(command -v git)
 
 # bun (same minimum policy as install.sh; bootstrap is inherited from it)
 if command -v bun >/dev/null 2>&1; then

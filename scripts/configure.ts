@@ -732,7 +732,7 @@ function samePluginSource(value: string | undefined, source: string) {
 function isSafeCompaction(spec: unknown) {
   const value = pluginSource(spec)
   if (!value) return false
-  return /(?:^|[/:])(?:opencode-safe-compaction(?:@[^/?#]*)?|safe-compaction|opencode-better-compact-plugin(?:\.git)?)(?:[/?#]|$)/.test(
+  return /(?:^|[/:])(?:opencode-safe-compaction(?:@[^/?#]*)?|safe-compaction|opencode-better-compact-plugin(?:\.git)?|better-compact)(?:[/?#]|$)/.test(
     value,
   )
 }
