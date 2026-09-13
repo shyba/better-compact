@@ -27,6 +27,10 @@ const maxUploadBatchesPerSource = 8
 const remoteTombstonePurgeIntervalMs = 24 * 60 * 60 * 1000
 const s3SourceFailurePath = "\u0000source"
 const s3SourceKinds = new Set(["codex-jsonl", "codex-jsonl-sessions", "pi-jsonl"])
+const piAgentDirectory = path.join(process.env.HOME ?? ".", ".pi/agent")
+const piShimNames = ["safe-compaction.ts", "safe-compaction-pi.ts", "safe-compaction-cat.ts"]
+const generatedPiShim = /^export \{ default \} from "[^"]*\/src\/(?:pi|cat)\.ts";$/
+
 const idleCompactionMinBytes = 8 * 1024 * 1024
 const idleCompactionMinFreePages = 1024
 const idleCompactionMinFreeRatio = 0.2
@@ -174,6 +178,54 @@ async function activate() {
   return run(bun, [configure], environment)
 }
 
+/** Shims this installer wrote in an earlier version. They load the same two
+ *  extensions as the Pi package, and two sources registering one tool name
+ *  makes Pi refuse the whole session, so they must not coexist. */
+async function generatedPiShims() {
+  const found: string[] = []
+  for (const name of piShimNames) {
+    const file = path.join(piAgentDirectory, "extensions", name)
+    try {
+      if (generatedPiShim.test((await readFile(file, "utf8")).trim())) found.push(file)
+    } catch {
+      // absent or unreadable: nothing of ours to remove
+    }
+  }
+  return found
+}
+
+async function piPackageRegistered() {
+  try {
+    const settings = JSON.parse(await readFile(path.join(piAgentDirectory, "settings.json"), "utf8")) as { packages?: unknown }
+    if (!Array.isArray(settings.packages)) return false
+    // Pi records local installs as a path relative to ~/.pi/agent, so compare
+    // resolved paths as well as the package names.
+    return settings.packages.some((entry) => {
+      if (typeof entry !== "string") return false
+      if (entry.includes("better-compact") || entry.includes("safe-compaction")) return true
+      if (entry.startsWith("git:") || entry.startsWith("npm:") || entry.startsWith("http")) return false
+      try {
+        return path.resolve(piAgentDirectory, entry) === path.resolve(installDir)
+      } catch {
+        return false
+      }
+    })
+  } catch {
+    return false
+  }
+}
+
+async function removeGeneratedPiShims() {
+  for (const file of await generatedPiShims()) {
+    try {
+      await rm(file, { force: true })
+      console.log(`removed the duplicate Pi extension shim ${file}; the Pi package provides the same extensions`)
+    } catch (error) {
+      console.error(`warning: could not remove ${file}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
 async function installPi() {
   const pi = process.env.OPENCODE_SAFE_COMPACTION_PI ?? "pi"
   if (!(await commandWorks(pi, ["--version"]))) {
@@ -186,7 +238,9 @@ async function installPi() {
   const source = piSource(mode)
   if (!source) return 2
   console.log(`Installing safe-compaction Pi extensions from ${source}`)
-  return run(pi, ["install", source], process.env)
+  const status = await run(pi, ["install", source], process.env)
+  if (status === 0) await removeGeneratedPiShims()
+  return status
 }
 
 function piSource(mode: Awaited<ReturnType<typeof installationMode>>) {
@@ -232,6 +286,20 @@ async function doctor() {
   checks.push(["SQLite database", await exists(databasePath), databasePath])
   checks.push(["OpenCode executable", await commandWorks(process.env.OPENCODE_SAFE_COMPACTION_OPENCODE ?? "opencode", ["--version"]), process.env.OPENCODE_SAFE_COMPACTION_OPENCODE ?? "opencode"])
   checks.push(["Bun executable", await commandWorks(process.env.OPENCODE_SAFE_COMPACTION_BUN ?? "bun", ["--version"]), process.env.OPENCODE_SAFE_COMPACTION_BUN ?? "bun"])
+  const piShims = await generatedPiShims()
+  const piPackage = await piPackageRegistered()
+  const piConflict = piShims.length > 0 && piPackage
+  checks.push([
+    "Pi extension sources",
+    !piConflict,
+    piConflict
+      ? `duplicate sources: ${piShims.join(", ")} plus the Pi package (remove one; Pi refuses conflicting tool names)`
+      : piShims.length
+        ? `shims: ${piShims.join(", ")}`
+        : piPackage
+          ? "Pi package"
+          : "not installed",
+  ])
   if (config.sync.enabled) {
     if (config.sync.transport === "s3") {
       const endpoint = s3EndpointFor(config)

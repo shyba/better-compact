@@ -22,6 +22,7 @@ describe("better-compact Pi installation", () => {
     const pi = await fakePi(root)
 
     const result = await runCLI(["install", "pi"], {
+      HOME: root,
       OPENCODE_SAFE_COMPACTION_DIR: install,
       OPENCODE_SAFE_COMPACTION_PI: pi,
       PI_LOG: log,
@@ -39,6 +40,7 @@ describe("better-compact Pi installation", () => {
     const pi = await fakePi(root)
 
     const result = await runCLI(["install", "pi"], {
+      HOME: root,
       OPENCODE_SAFE_COMPACTION_DIR: path.join(root, "missing"),
       OPENCODE_SAFE_COMPACTION_PI: pi,
       OPENCODE_SAFE_COMPACTION_PI_SOURCE: "git:github.com/shyba/opencode-better-compact-plugin",
@@ -52,6 +54,52 @@ describe("better-compact Pi installation", () => {
     )
   })
 
+  test("removes a generated extension shim that would conflict with the registered package", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
+    temporary.push(root)
+    const install = path.join(root, "safe-compaction")
+    await mkdir(path.join(install, ".git"), { recursive: true })
+    const extensions = path.join(root, ".pi/agent/extensions")
+    await mkdir(extensions, { recursive: true })
+    const shim = path.join(extensions, "safe-compaction.ts")
+    await writeFile(shim, `export { default } from "${install}/src/pi.ts";\n`)
+    const pi = await fakePi(root)
+
+    const result = await runCLI(["install", "pi"], {
+      HOME: root,
+      OPENCODE_SAFE_COMPACTION_DIR: install,
+      OPENCODE_SAFE_COMPACTION_PI: pi,
+      PI_LOG: path.join(root, "pi.log"),
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("removed the duplicate Pi extension shim")
+    expect(await Bun.file(shim).exists()).toBe(false)
+  })
+
+  test("leaves a foreign extension file with the same name in place", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
+    temporary.push(root)
+    const install = path.join(root, "safe-compaction")
+    await mkdir(path.join(install, ".git"), { recursive: true })
+    const extensions = path.join(root, ".pi/agent/extensions")
+    await mkdir(extensions, { recursive: true })
+    const shim = path.join(extensions, "safe-compaction.ts")
+    await writeFile(shim, "export default function unrelated() {}\n")
+    const pi = await fakePi(root)
+
+    const result = await runCLI(["install", "pi"], {
+      HOME: root,
+      OPENCODE_SAFE_COMPACTION_DIR: install,
+      OPENCODE_SAFE_COMPACTION_PI: pi,
+      PI_LOG: path.join(root, "pi.log"),
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).not.toContain("removed the duplicate Pi extension shim")
+    expect(await Bun.file(shim).exists()).toBe(true)
+  })
+
   test("refuses an ephemeral npx install without a source override", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
     temporary.push(root)
@@ -59,6 +107,7 @@ describe("better-compact Pi installation", () => {
     const pi = await fakePi(root)
 
     const result = await runCLI(["install", "pi"], {
+      HOME: root,
       OPENCODE_SAFE_COMPACTION_DIR: path.join(root, "missing"),
       OPENCODE_SAFE_COMPACTION_PI: pi,
       npm_config_user_agent: "npm/11.0.0 npx/11.0.0",

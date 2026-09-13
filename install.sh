@@ -596,10 +596,16 @@ legacy_pi_shim=$pi_ext_dir/safe-compaction.ts
 if [ -n "$pi_bin" ] && [ -x "$pi_bin" ]; then
   if "$pi_bin" install "$install_dir"; then
     say "installed as a pi package (entry points: src/pi.ts, src/cat.ts)"
-    if [ -f "$legacy_pi_shim" ]; then
-      rm -f "$legacy_pi_shim"
-      say "removed the legacy hand-written shim so the extension is not loaded twice"
-    fi
+    # Two extension sources registering the same tool name make Pi refuse the
+    # session, so drop the shims this installer generated earlier. Foreign
+    # files with the same name are left alone.
+    for pi_shim_name in safe-compaction.ts safe-compaction-pi.ts safe-compaction-cat.ts; do
+      pi_shim=$pi_ext_dir/$pi_shim_name
+      if [ -f "$pi_shim" ] && grep -Eq '^export \{ default \} from "[^"]*/src/(pi|cat)\.ts";$' "$pi_shim"; then
+        rm -f "$pi_shim"
+        say "removed the duplicate shim $pi_shim; the Pi package provides the same extensions"
+      fi
+    done
     say "restart any running pi session to load it"
   else
     say "pi package install failed; run it yourself: pi install $install_dir"
