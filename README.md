@@ -2,21 +2,36 @@
 
 ## Install
 
-Full plugin (requires OpenCode `>=1.18.4 <1.19.0` on the host):
+One command installs whatever the host supports — it probes for OpenCode, Pi and Codex and installs the matching targets:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/shyba/better-compact/default/install.sh | sh
 ```
 
-Sync-only (feeds sessions into the corpus; **no OpenCode required** — for ingest hosts):
+Per-runtime behavior:
+
+| runtime detected | what gets installed |
+|---|---|
+| OpenCode `>=1.18.4 <1.19.0` | full plugin (compaction hooks + TUI selector), as before |
+| OpenCode absent or unsupported version | skipped gracefully — no failure |
+| pi (`~/.pi/agent` present) | extension shim at `~/.pi/agent/extensions/safe-compaction.ts` |
+| codex (`~/.codex` present) | sessions covered by the sync daemon (codex-jsonl source); codex has no plugin API |
+| always | `better-compact` CLI wrapper; sync daemon if sync env is set |
+
+Sync daemon (optional at install time, runtime-independent):
+
+```sh
+# before install, or later from the install dir:
+OPENCODE_SAFE_COMPACTION_SYNC_URL=<session-center-url> OPENCODE_SAFE_COMPACTION_SYNC_SETUP_ARGS="--token <bearer>" \
+  curl -fsSL https://raw.githubusercontent.com/shyba/better-compact/default/install.sh | sh
+```
+
+Sync-only hosts (no compaction at all, no runtime probing):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/shyba/better-compact/default/install-sync-only.sh | sh -s -- --url <session-center-url> [--token <bearer>]
 ```
 
-`opencode-safe-compaction` is a global OpenCode V1 plugin that builds a bounded recovery ledger and asks the compaction model to choose the semantically active recovery fields. A structurally valid model-authored summary is accepted only when it preserves the current canonical ledger block and digest. Its separate TUI entrypoint provides a native compaction-model selector. It is an independent MIT-licensed repository and makes no OpenCode core changes.
-
-The package is private at version `0.1.0`. Git/source-path installation is the supported installation path for now; the package metadata and exports are ready for a later npm release.
 
 ## Compatibility and prerequisites
 
