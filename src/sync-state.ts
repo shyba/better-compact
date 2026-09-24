@@ -89,6 +89,10 @@ export class SyncState {
     this.db.query("insert or ignore into schema_migration(version, applied_at) values (14, ?)").run(Date.now())
     this.db.exec("create table if not exists s3_failure_audit (id integer primary key, source_id text not null references source(id) on delete cascade, path text not null, size integer not null, mtime_ms real not null, attempt_count integer not null, next_attempt_at integer not null, exhausted integer not null, last_error text, failure_updated_at integer not null, cleared_at integer not null, cleared_by text not null)")
     this.db.query("insert or ignore into schema_migration(version, applied_at) values (15, ?)").run(Date.now())
+    // 16: a budgeted deep verify stops mid-list and resumes here next pass.
+    const deepCursorColumn = (this.db.query("pragma table_info(source_scan)").all() as Array<{ name: string }>).some((row) => row.name === "full_scan_cursor")
+    if (!deepCursorColumn) this.db.exec("alter table source_scan add column full_scan_cursor text")
+    this.db.query("insert or ignore into schema_migration(version, applied_at) values (16, ?)").run(Date.now())
     this.db.exec("update source set local_revision=max(local_revision, coalesce((select max(record_revision) from normalized_record where normalized_record.source_id=source.id), 0))")
   }
 
@@ -201,7 +205,21 @@ export class SyncState {
 
   recordS3SourceComplete(sourceID: string, pathMtimeMs: number, pathSizeOrCount: number, childMaxMtimeMs: number, fullScan: boolean, now = Date.now()): void {
     this.recordSourceComplete(sourceID, pathMtimeMs, pathSizeOrCount, childMaxMtimeMs, now)
-    if (fullScan) this.db.query("update source_scan set last_full_scan_at=? where source_id=?").run(now, sourceID)
+    // A completed deep verify both timestamps the cycle and closes it; a partial
+    // one only records the walk fingerprint and keeps the cursor.
+    if (fullScan) this.db.query("update source_scan set last_full_scan_at=?, full_scan_cursor=null where source_id=?").run(now, sourceID)
+  }
+
+  /** Where an unfinished deep verify stopped, so the next pass resumes after it
+   *  instead of re-verifying the same prefix. Undefined means no cycle is open. */
+  s3FullScanCursor(sourceID: string): string | undefined {
+    const row = this.db.query("select full_scan_cursor from source_scan where source_id=?").get(sourceID) as { full_scan_cursor?: string | null } | null
+    return typeof row?.full_scan_cursor === "string" ? row.full_scan_cursor : undefined
+  }
+
+  /** Record deep-verify progress. Passing undefined closes the cycle. */
+  setS3FullScanCursor(sourceID: string, cursor: string | undefined): void {
+    this.db.query("update source_scan set full_scan_cursor=? where source_id=?").run(cursor ?? null, sourceID)
   }
 
   s3FullScanDue(sourceID: string, intervalMs: number, now = Date.now()): boolean {

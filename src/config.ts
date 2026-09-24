@@ -11,6 +11,10 @@ export type SyncConfig = {
   database_url_env: string
   poll_interval_ms: number
   rescan_interval_ms: number
+  /** Budget for one pass of the rotating deep verify: unchanged files are
+   *  re-hashed from the resume cursor until this many bytes are spent, so a
+   *  large corpus is re-verified at a trickle instead of as one burst. */
+  deep_verify_bytes_per_pass: number
   /** A source file is not hashed until it has been untouched for this long.
    *  Hashing a file that is still being appended to races the writer, re-reads
    *  the whole file on every poll, and throws the result away as soon as the
@@ -84,6 +88,7 @@ const defaults: BetterCompactConfig = {
     poll_interval_ms: 30_000,
     rescan_interval_ms: 300_000,
     settle_ms: 30_000,
+    deep_verify_bytes_per_pass: 32 * 1024 * 1024,
     failure_retry_attempts: 3,
     failure_retry_interval_ms: 300_000,
     batch_size: 100,
@@ -189,7 +194,7 @@ export function validateConfig(value: unknown): BetterCompactConfig {
   for (const key of ["s3_url_env", "s3_token_env", "database_url_env"] as const) {
     if (typeof result.sync[key] !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(result.sync[key])) throw new TypeError(`sync.${key} must be an environment variable name`)
   }
-  for (const key of ["poll_interval_ms", "rescan_interval_ms", "failure_retry_attempts", "failure_retry_interval_ms", "batch_size", "max_outbox_bytes", "retention_days"] as const) {
+  for (const key of ["poll_interval_ms", "rescan_interval_ms", "deep_verify_bytes_per_pass", "failure_retry_attempts", "failure_retry_interval_ms", "batch_size", "max_outbox_bytes", "retention_days"] as const) {
     if (!Number.isSafeInteger(result.sync[key]) || result.sync[key] <= 0) throw new TypeError(`sync.${key} must be a positive integer`)
   }
   // A zero settle budget keeps the historical "hash it now" behaviour; a

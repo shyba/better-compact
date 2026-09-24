@@ -31,6 +31,35 @@ describe("portable better-compact state", () => {
   expect(() => validateConfig({ version: 1, sync: {}, sources: [{ kind: "fixture", database: "db", extra: true }] })).toThrow("source contains an unknown key")
   })
 
+  test("persists deep-verify progress and closes the cycle when it completes", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "better-compact-state-"))
+    temporary.push(directory)
+    const state = await openSyncState(path.join(directory, "state.sqlite"))
+    state.ensureInstallation("install-1", "incarnation-1", "test")
+    state.upsertSource({ id: "source-1", installationID: "install-1", kind: "codex-jsonl", schemaVersion: 1, locator: "codex-jsonl://sessions", incarnation: "source-inc-1" })
+    state.recordS3SourceComplete("source-1", 1, 2, 3, true, 1_000)
+    expect(state.s3FullScanDue("source-1", 60_000, 2_000)).toBe(false)
+
+    // Stop mid-list: the cycle stays open and stays due.
+    state.setS3FullScanCursor("source-1", "nested/session.jsonl")
+    expect(state.s3FullScanCursor("source-1")).toBe("nested/session.jsonl")
+    state.recordS3SourceComplete("source-1", 1, 2, 3, false, 3_000)
+    expect(state.s3FullScanCursor("source-1")).toBe("nested/session.jsonl")
+    expect(state.s3FullScanDue("source-1", 1, 4_000)).toBe(true)
+
+    // Finishing the cycle timestamps it and clears the cursor.
+    state.recordS3SourceComplete("source-1", 1, 2, 3, true, 5_000)
+    expect(state.s3FullScanCursor("source-1")).toBeUndefined()
+    expect(state.s3FullScanDue("source-1", 60_000, 6_000)).toBe(false)
+
+    // Closing a cycle explicitly also works (used by a budgeted pass that had
+    // nothing left to verify).
+    state.setS3FullScanCursor("source-1", "a.jsonl")
+    state.setS3FullScanCursor("source-1", undefined)
+    expect(state.s3FullScanCursor("source-1")).toBeUndefined()
+    state.close()
+  })
+
   test("clears every recorded S3 failure for a source and audits each one", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "better-compact-state-"))
     temporary.push(directory)

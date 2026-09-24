@@ -743,7 +743,20 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
       let failureRecorded = false
       try {
         const snapshot = await discoverS3JsonlSnapshot(root)
-        const fullScan = options.bypassSkip || state.s3FullScanDue(sourceID, config.sync.rescan_interval_ms)
+        // The deep verify rotates through unchanged files from the cursor to the
+        // end of the sorted list, at most deep_verify_bytes_per_pass bytes a
+        // pass, so a multi-GB corpus never becomes a hashing spike. Changes are
+        // still applied as they appear, whatever the budget.
+        const rescanDue = options.bypassSkip || state.s3FullScanDue(sourceID, config.sync.rescan_interval_ms)
+        // A stored cursor always resumes, even if the interval was just lowered
+        // or the timestamp was written by an older build.
+        const deepCursor = options.bypassSkip ? undefined : state.s3FullScanCursor(sourceID)
+        const deepCycle = rescanDue || deepCursor !== undefined
+        const deepBudget = config.sync.deep_verify_bytes_per_pass
+        let deepBytes = 0
+        let deepLastPath: string | undefined
+        let deepExhaustedBudget = false
+        const fullScan = Boolean(options.bypassSkip)
         for (const file of snapshot.files) {
           if (signal?.aborted) { scanCovered = false; break }
           const previous = state.s3File(sourceID, file.sourcePath)
@@ -771,7 +784,19 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
             settledSkips++
             continue
           }
-          if (decision === "skip") continue
+          // Unchanged files are only touched by the rotating deep verify, and
+          // only while it has budget left. Running out of budget must not stop
+          // the scan: later files may still have changed.
+          if (decision === "skip") {
+            const afterCursor = deepCursor === undefined || file.sourcePath > deepCursor
+            if (!deepCycle || !afterCursor) continue
+            if (deepExhaustedBudget || deepBytes >= deepBudget) {
+              deepExhaustedBudget = true
+              continue
+            }
+            deepBytes += file.size
+            deepLastPath = file.sourcePath
+          }
           try {
             const hashed = await hashS3FileSnapshot(file.filename, file.size, previous && file.size > previous.size ? previous.size : undefined)
             const afterHash = await stat(file.filename)
@@ -815,11 +840,18 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
           // was either hashed or deliberately deferred to its own retry. Tying
           // this to upload success is what used to make one busy session file
           // (or one unreachable endpoint) re-hash the whole corpus every poll.
-          state.recordS3SourceComplete(sourceID, snapshot.rootMtimeMs, snapshot.files.length, Math.max(0, ...snapshot.files.map((file) => file.mtimeMs)), fullScan)
+          // A deep verify only completes the cycle once it has walked from the
+          // cursor to the end of the list; a budgeted pass leaves the cursor for
+          // the next one.
+          const deepComplete = Boolean(options.bypassSkip) || (deepCycle && !deepExhaustedBudget)
+          state.recordS3SourceComplete(sourceID, snapshot.rootMtimeMs, snapshot.files.length, Math.max(0, ...snapshot.files.map((file) => file.mtimeMs)), deepComplete)
+          if (!deepComplete && deepCycle && deepLastPath) state.setS3FullScanCursor(sourceID, deepLastPath)
           if (sourceComplete) state.clearS3Failure(sourceID, s3SourceFailurePath)
           const notes = [
             !sourceComplete && `${deferredFailures} deferred failure${deferredFailures === 1 ? "" : "s"}; source incomplete`,
             settledSkips > 0 && `${settledSkips} deferred (still changing)`,
+            deepCycle && deepComplete && deepCursor !== undefined && "deep verify resumed and completed",
+            deepCycle && !deepComplete && `${(deepBytes / 1048576).toFixed(1)} MiB deep verified, resuming after ${deepLastPath ?? "the cursor"}`,
           ].filter(Boolean).join(", ")
           console.log(`uploaded ${uploaded} changed JSONL file${uploaded === 1 ? "" : "s"} from ${root}${notes ? ` (${notes})` : ""}`)
         }
@@ -1040,7 +1072,7 @@ async function syncStatus() {
   // Pacing is the first thing to check when a host looks busy: a file is hashed
   // once it has been quiet for settle_ms, a full deep verify runs every
   // rescan_ms, and the loop wakes every poll_ms.
-  console.log(`sync pacing: poll ${config.sync.poll_interval_ms}ms, rescan ${config.sync.rescan_interval_ms}ms, settle ${config.sync.settle_ms}ms, retry ${config.sync.failure_retry_interval_ms}ms x${config.sync.failure_retry_attempts}`)
+  console.log(`sync pacing: poll ${config.sync.poll_interval_ms}ms, rescan ${config.sync.rescan_interval_ms}ms, settle ${config.sync.settle_ms}ms, deep verify ${(config.sync.deep_verify_bytes_per_pass / 1048576).toFixed(0)} MiB/pass, retry ${config.sync.failure_retry_interval_ms}ms x${config.sync.failure_retry_attempts}`)
   if (!(await access(paths.state).then(() => true).catch(() => false))) {
     console.log("pending outbox: 0")
     console.log("outbox bytes: 0")

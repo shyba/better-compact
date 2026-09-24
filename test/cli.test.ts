@@ -374,6 +374,52 @@ describe("better-compact S3 sync scanning", () => {
     } finally { server.stop(true) }
   })
 
+  test("deep-verifies a large corpus in budgeted slices and still uploads changes", async () => {
+    // A 24/7 service must not burst: once the corpus is acknowledged, unchanged
+    // files are re-hashed a slice at a time from a persisted cursor (rescan is
+    // due every pass here), while real changes upload immediately even when the
+    // slice budget is already spent.
+    const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
+    temporary.push(root)
+    const sessions = path.join(root, "sessions")
+    await mkdir(sessions)
+    const mb = (n: number) => "z".repeat(n * 1024 * 1024)
+    for (const name of ["a.jsonl", "b.jsonl", "c.jsonl", "d.jsonl"]) await writeFile(path.join(sessions, name), mb(5))
+    const uploadedPaths: string[] = []
+    const server = Bun.serve({ port: 0, async fetch(request) {
+      uploadedPaths.push(request.headers.get("x-vcc-path") ?? "")
+      await request.arrayBuffer()
+      return new Response(null, { status: 204 })
+    } })
+    try {
+      const config = path.join(root, "config.json"), state = path.join(root, "state.sqlite")
+      await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3", settle_ms: 0, rescan_interval_ms: 1, deep_verify_bytes_per_pass: 4 * 1024 * 1024 }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
+      const environment = { HOME: root, BETTER_COMPACT_CONFIG: config, BETTER_COMPACT_STATE: state, SESSION_CENTER_URL: `http://127.0.0.1:${server.port}`, S3_SYNC_TOKEN: "token-token-token" }
+      const sourceID = createHash("sha256").update(`codex-jsonl\n${sessions}`).digest("hex").slice(0, 32)
+      const cursor = async () => { const probe = await openSyncState(state); try { return probe.s3FullScanCursor(sourceID) } finally { probe.close() } }
+
+      // First pass acknowledges the whole corpus (every file is new).
+      expect((await runCLI(["sync", "run", "--pass"], environment)).exitCode).toBe(0)
+      expect(await cursor()).toBeUndefined()
+
+      // Next pass re-verifies only the first slice, then stores where to resume.
+      expect((await runCLI(["sync", "run", "--pass"], environment)).exitCode).toBe(0)
+      expect(await cursor()).toBe("a.jsonl")
+
+      // A real change must go out even though the slice budget is spent early.
+      await appendFile(path.join(sessions, "d.jsonl"), "changed\n")
+      expect((await runCLI(["sync", "run", "--pass"], environment)).exitCode).toBe(0)
+      expect(uploadedPaths).toContain("d.jsonl")
+      expect(await cursor()).toBeTruthy()
+
+      // The rotation finishes and closes itself.
+      for (let pass = 0; pass < 8 && (await cursor()) !== undefined; pass++) {
+        expect((await runCLI(["sync", "run", "--pass"], environment)).exitCode).toBe(0)
+      }
+      expect(await cursor()).toBeUndefined()
+    } finally { server.stop(true) }
+  })
+
   test("keeps syncing the remaining files when one file keeps failing", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
     temporary.push(root)
