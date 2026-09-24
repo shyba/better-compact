@@ -11,6 +11,11 @@ export type SyncConfig = {
   database_url_env: string
   poll_interval_ms: number
   rescan_interval_ms: number
+  /** A source file is not hashed until it has been untouched for this long.
+   *  Hashing a file that is still being appended to races the writer, re-reads
+   *  the whole file on every poll, and throws the result away as soon as the
+   *  next append lands. 0 restores immediate hashing. */
+  settle_ms: number
   failure_retry_attempts: number
   failure_retry_interval_ms: number
   batch_size: number
@@ -78,6 +83,7 @@ const defaults: BetterCompactConfig = {
     database_url_env: "OPENCODE_SYNC_DATABASE_URL",
     poll_interval_ms: 30_000,
     rescan_interval_ms: 300_000,
+    settle_ms: 30_000,
     failure_retry_attempts: 3,
     failure_retry_interval_ms: 300_000,
     batch_size: 100,
@@ -186,6 +192,9 @@ export function validateConfig(value: unknown): BetterCompactConfig {
   for (const key of ["poll_interval_ms", "rescan_interval_ms", "failure_retry_attempts", "failure_retry_interval_ms", "batch_size", "max_outbox_bytes", "retention_days"] as const) {
     if (!Number.isSafeInteger(result.sync[key]) || result.sync[key] <= 0) throw new TypeError(`sync.${key} must be a positive integer`)
   }
+  // A zero settle budget keeps the historical "hash it now" behaviour; a
+  // positive value defers files that are still being written.
+  if (!Number.isSafeInteger(result.sync.settle_ms) || result.sync.settle_ms < 0) throw new TypeError("sync.settle_ms must be a non-negative integer")
   if (typeof result.sync.include_parts !== "boolean" || typeof result.sync.include_tool_output !== "boolean" || typeof result.sync.allow_insecure_remote !== "boolean" || typeof result.sync.keep_remote_on_missing !== "boolean" || typeof result.sync.allow_source_shrink !== "boolean") throw new TypeError("sync include flags must be boolean")
   const rag = object.rag === undefined ? {} : object.rag
   if (!rag || typeof rag !== "object" || Array.isArray(rag)) throw new TypeError("config.rag must be an object")

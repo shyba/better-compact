@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { describe, expect, test } from "bun:test"
-import { discoverS3JsonlFiles, discoverS3JsonlSnapshot, hashS3File, hashS3FileSnapshot, planS3Upload, s3FileID, uploadS3File, validateS3Endpoint } from "../src/s3-sync.js"
+import { decideS3FilePass, discoverS3JsonlFiles, discoverS3JsonlSnapshot, hashS3File, hashS3FileSnapshot, planS3Upload, s3FileID, uploadS3File, validateS3Endpoint } from "../src/s3-sync.js"
 
 describe("session-center S3 source transport", () => {
   test("discovers only regular JSONL files and preserves relative ordering", async () => {
@@ -83,6 +83,22 @@ describe("session-center S3 source transport", () => {
     expect(first.version.fileID).not.toBe(second.version.fileID)
     expect(first.version.fileID.startsWith("s2_")).toBe(true)
     expect(planS3Upload("session.jsonl", { size: 18, mtimeMs: 30 }, "c", first.version, "b", "source-one")).toMatchObject({ action: "upload", full: false, start: 14 })
+  })
+
+  test("defers files that are still being written and hashes settled ones", () => {
+    const now = 1_000_000
+    // Still growing: hashing it would race the writer, so leave it for a later pass.
+    expect(decideS3FilePass({ fullScan: true, metadataChanged: true, hasFailure: false, mtimeMs: now - 1_000, now, settleMs: 30_000 })).toBe("defer")
+    // Settled and changed: hash it.
+    expect(decideS3FilePass({ fullScan: false, metadataChanged: true, hasFailure: false, mtimeMs: now - 60_000, now, settleMs: 30_000 })).toBe("hash")
+    // Settled and untouched by a non-full pass: nothing to do.
+    expect(decideS3FilePass({ fullScan: false, metadataChanged: false, hasFailure: false, mtimeMs: now - 60_000, now, settleMs: 30_000 })).toBe("skip")
+    // A full scan still re-verifies settled files even when metadata matches.
+    expect(decideS3FilePass({ fullScan: true, metadataChanged: false, hasFailure: false, mtimeMs: now - 60_000, now, settleMs: 30_000 })).toBe("hash")
+    // A due retry is an explicit schedule and must not be starved by the gate.
+    expect(decideS3FilePass({ fullScan: false, metadataChanged: false, hasFailure: true, mtimeMs: now - 1_000, now, settleMs: 30_000 })).toBe("hash")
+    // settle_ms=0 keeps the original hash-immediately behaviour.
+    expect(decideS3FilePass({ fullScan: false, metadataChanged: true, hasFailure: false, mtimeMs: now, now, settleMs: 0 })).toBe("hash")
   })
 
   test("validates base URLs and refuses unsafe remote plaintext", () => {

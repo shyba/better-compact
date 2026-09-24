@@ -320,7 +320,7 @@ describe("better-compact S3 sync scanning", () => {
     } })
     try {
       const config = path.join(root, "config.json"), state = path.join(root, "state.sqlite")
-      await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3" }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
+      await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3", settle_ms: 0 }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
       const env = { HOME: root, BETTER_COMPACT_CONFIG: config, BETTER_COMPACT_STATE: state, SESSION_CENTER_URL: `http://127.0.0.1:${server.port}`, S3_SYNC_TOKEN: "token-token-token" }
       expect((await runCLI(["sync", "run", "--pass"], env)).exitCode).toBe(0)
       await appendFile(filename, "two\n")
@@ -333,6 +333,69 @@ describe("better-compact S3 sync scanning", () => {
       expect(requests[2].full).toBe("true")
       expect(requests[2].body).toBe(mode === "concurrent growth" ? "one\ntwo\nthree\n" : "one\ntwo\n")
       expect(requests.every(r => !!r.source)).toBe(true)
+    } finally { server.stop(true) }
+  })
+
+  test("records a completed scan even when uploads fail, so the corpus is not re-hashed every poll", async () => {
+    // Regression: `last_full_scan_at` used to advance only when every file
+    // uploaded. One busy session file or one unreachable endpoint therefore
+    // left the scan permanently incomplete and every later pass re-hashed the
+    // whole source, which pinned a core at 100% on a busy host.
+    const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
+    temporary.push(root)
+    const sessions = path.join(root, "sessions")
+    await mkdir(sessions)
+    const filename = path.join(sessions, "session.jsonl")
+    await writeFile(filename, "one\n")
+    const server = Bun.serve({ port: 0, async fetch(request) {
+      await request.arrayBuffer()
+      return new Response("nope", { status: 500 })
+    } })
+    try {
+      const config = path.join(root, "config.json"), state = path.join(root, "state.sqlite")
+      await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3", settle_ms: 0 }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
+      const environment = { HOME: root, BETTER_COMPACT_CONFIG: config, BETTER_COMPACT_STATE: state, SESSION_CENTER_URL: `http://127.0.0.1:${server.port}`, S3_SYNC_TOKEN: "token-token-token" }
+
+      // The upload fails, so the pass reports failure -- and still records that
+      // the source was walked in full.
+      expect((await runCLI(["sync", "run", "--pass"], environment)).exitCode).toBe(1)
+
+      const sourceID = createHash("sha256").update(`codex-jsonl\n${sessions}`).digest("hex").slice(0, 32)
+      const syncState = await openSyncState(state)
+      try {
+        expect(syncState.s3FullScanDue(sourceID, 300_000)).toBe(false)
+      } finally {
+        syncState.close()
+      }
+      const db = new Database(state, { readonly: true })
+      const row = db.query("select last_full_scan_at from source_scan where source_id=?").get(sourceID) as { last_full_scan_at: number | null } | null
+      db.close()
+      expect(row?.last_full_scan_at).toBeGreaterThan(0)
+    } finally { server.stop(true) }
+  })
+
+  test("keeps syncing the remaining files when one file keeps failing", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
+    temporary.push(root)
+    const sessions = path.join(root, "sessions")
+    await mkdir(sessions)
+    await writeFile(path.join(sessions, "a-broken.jsonl"), "one\n")
+    await writeFile(path.join(sessions, "b-good.jsonl"), "two\n")
+    const paths: string[] = []
+    const server = Bun.serve({ port: 0, async fetch(request) {
+      const sourcePath = request.headers.get("x-vcc-path") ?? ""
+      paths.push(sourcePath)
+      await request.arrayBuffer() // drain the body so the connection stays usable
+      return new Response(null, { status: sourcePath.includes("a-broken") ? 500 : 204 })
+    } })
+    try {
+      const config = path.join(root, "config.json"), state = path.join(root, "state.sqlite")
+      await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3", settle_ms: 0 }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
+      const environment = { HOME: root, BETTER_COMPACT_CONFIG: config, BETTER_COMPACT_STATE: state, SESSION_CENTER_URL: `http://127.0.0.1:${server.port}`, S3_SYNC_TOKEN: "token-token-token" }
+
+      await runCLI(["sync", "run", "--pass"], environment)
+      // A failing file must not stop the files that sort after it.
+      expect(paths).toContain("b-good.jsonl")
     } finally { server.stop(true) }
   })
 
@@ -356,7 +419,7 @@ describe("better-compact S3 sync scanning", () => {
       const state = path.join(root, "state.sqlite")
       await writeFile(config, JSON.stringify({
         version: 1,
-        sync: { enabled: true, transport: "s3", rescan_interval_ms: 60_000 },
+        sync: { enabled: true, transport: "s3", rescan_interval_ms: 60_000, settle_ms: 0 },
         sources: [
           { kind: "codex-jsonl", database: path.join(root, "sessions") },
           { kind: "codex-jsonl-sessions", database: path.join(root, "sessions") },
@@ -424,7 +487,7 @@ describe("better-compact S3 sync scanning", () => {
       const state = path.join(root, "state.sqlite")
       await writeFile(config, JSON.stringify({
         version: 1,
-        sync: { enabled: true, transport: "s3", failure_retry_attempts: 2, failure_retry_interval_ms: 60_000 },
+        sync: { enabled: true, transport: "s3", failure_retry_attempts: 2, failure_retry_interval_ms: 60_000, settle_ms: 0 },
         sources: [{ kind: "codex-jsonl", database: sessions }],
       }))
       const environment = {
@@ -489,7 +552,7 @@ globalThis.fetch = async (_url, init = {}) => {
     const state = path.join(root, "state.sqlite")
     await writeFile(config, JSON.stringify({
       version: 1,
-      sync: { enabled: true, transport: "s3", failure_retry_attempts: 3, failure_retry_interval_ms: 60_000 },
+      sync: { enabled: true, transport: "s3", failure_retry_attempts: 3, failure_retry_interval_ms: 60_000, settle_ms: 0 },
       sources: [
         { kind: "codex-jsonl", database: sessions },
         { kind: "pi-jsonl", database: pi },
@@ -529,7 +592,7 @@ globalThis.fetch = async (_url, init = {}) => {
     await mkdir(sessions, { recursive: true })
     const state = path.join(root, "state.sqlite")
     const config = path.join(root, "config.json")
-    await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3" }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
+    await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3", settle_ms: 0 }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
     const sourceID = createHash("sha256").update(`codex-jsonl\n${path.resolve(sessions)}`).digest("hex").slice(0, 32)
     const store = await openSyncState(state)
     store.ensureInstallation("installation-1", "incarnation-1")

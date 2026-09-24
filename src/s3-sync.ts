@@ -98,6 +98,31 @@ export async function discoverS3JsonlSnapshot(root: string): Promise<S3SourceSna
   return { rootMtimeMs: metadata.mtimeMs, files }
 }
 
+/** Decide what a sync pass should do with one discovered source file.
+ *
+ *  A file that is still being written is deferred rather than hashed. Hashing
+ *  a growing file races the writer; the losing side of that race used to abort
+ *  the whole source scan, which left `last_full_scan_at` unset, which made the
+ *  next pass re-hash the entire corpus -- forever, at full CPU, on a busy host.
+ *  Deferring also stops a hot session file from being re-read (and prefix-hashed
+ *  over its whole acknowledged length) on every single poll. */
+export function decideS3FilePass(input: {
+  fullScan: boolean
+  metadataChanged: boolean
+  hasFailure: boolean
+  mtimeMs: number
+  now: number
+  settleMs: number
+}): "hash" | "skip" | "defer" {
+  // A due retry is an explicit schedule. Honouring it even while the file is
+  // moving keeps a perpetually written file from being starved forever; the
+  // retry interval, not the settle gate, bounds how often it is attempted.
+  if (input.hasFailure) return "hash"
+  if (input.settleMs > 0 && Number.isFinite(input.mtimeMs) && input.now - input.mtimeMs < input.settleMs) return "defer"
+  if (input.fullScan || input.metadataChanged) return "hash"
+  return "skip"
+}
+
 export async function hashS3File(filename: string): Promise<string> {
   const hash = createHash("sha256")
   for await (const chunk of createReadStream(filename)) hash.update(chunk as Uint8Array)

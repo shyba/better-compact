@@ -12,7 +12,7 @@ import { discoverJsonl, discoverJsonlSessions, inspectJsonl, readSessionHeader, 
 import type { JsonlCheckpoint, JsonlDiscoveryResult, JsonlReconcilePrefix, JsonlSessionCheckpoint } from "../src/jsonl.js"
 import { applyRemoteMigration, ensureRemoteSource, openPostgres, purgeRemoteTombstones, readRemoteFence, recordObservation, uploadFenced } from "../src/postgres.js"
 import { openSyncState, type NormalizedRecord } from "../src/sync-state.js"
-import { discoverS3JsonlSnapshot, hashS3FileSnapshot, planS3Upload, uploadS3File, validateS3Endpoint } from "../src/s3-sync.js"
+import { decideS3FilePass, discoverS3JsonlSnapshot, hashS3FileSnapshot, planS3Upload, uploadS3File, validateS3Endpoint } from "../src/s3-sync.js"
 import { verifySync } from "./sync-verify.js"
 import { inspectCli, cliHelp } from "./cli-help.js"
 
@@ -724,15 +724,19 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
       }
       let uploaded = 0
       let deferredFailures = 0
+      let settledSkips = 0
       let sourceComplete = true
-      let fullScanComplete = true
+      // Coverage of the walk itself, independent of upload success. Only a walk
+      // that stopped early may leave the full-scan timestamp untouched; upload
+      // failures are tracked per file and must not force a re-hash of the whole
+      // source on the next pass.
+      let scanCovered = true
       let failureRecorded = false
       try {
         const snapshot = await discoverS3JsonlSnapshot(root)
         const fullScan = options.bypassSkip || state.s3FullScanDue(sourceID, config.sync.rescan_interval_ms)
-        fullScanComplete = fullScan
         for (const file of snapshot.files) {
-          if (signal?.aborted) break
+          if (signal?.aborted) { scanCovered = false; break }
           const previous = state.s3File(sourceID, file.sourcePath)
           const failure = state.s3Failure(sourceID, file.sourcePath)
           if (!options.bypassSkip && failure && !state.s3FailureDue(sourceID, file.sourcePath)) {
@@ -740,7 +744,6 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
             if (!metadataChanged) {
               failed = true
               sourceComplete = false
-              fullScanComplete = false
               deferredFailures++
               console.error(`warning: S3 file ${source.kind}/${file.sourcePath} has a deferred ${failure.exhausted ? "exhausted" : "retry"} failure (attempt ${failure.attemptCount}/${config.sync.failure_retry_attempts}); ${failure.exhausted ? "run better-compact sync retry-s3 for this file version" : `next retry after ${new Date(failure.nextAttemptAt).toISOString()}`}`)
               continue
@@ -749,7 +752,17 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
           }
           if (options.bypassSkip) state.clearS3Failure(sourceID, file.sourcePath)
           const metadataChanged = !previous || previous.size !== file.size || previous.mtimeMs !== file.mtimeMs
-          if (!fullScan && !metadataChanged && !failure) continue
+          // A manual pass hashes whatever it finds; the service waits for a file
+          // to settle first so an actively written session is never hashed while
+          // it is still growing.
+          const decision = options.bypassSkip
+            ? "hash"
+            : decideS3FilePass({ fullScan, metadataChanged, hasFailure: Boolean(failure), mtimeMs: file.mtimeMs, now: Date.now(), settleMs: config.sync.settle_ms })
+          if (decision === "defer") {
+            settledSkips++
+            continue
+          }
+          if (decision === "skip") continue
           try {
             const hashed = await hashS3FileSnapshot(file.filename, file.size, previous && file.size > previous.size ? previous.size : undefined)
             const afterHash = await stat(file.filename)
@@ -773,26 +786,33 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
             if (signal?.aborted) {
               state.recordS3Failure(sourceID, file.sourcePath, { size: file.size, mtimeMs: file.mtimeMs }, "upload interrupted; remote acceptance unknown", config.sync.failure_retry_attempts, config.sync.failure_retry_interval_ms)
               sourceComplete = false
-              fullScanComplete = false
+              scanCovered = false
               break
             }
             const message = error instanceof Error ? error.message : String(error)
             const retry = state.recordS3Failure(sourceID, file.sourcePath, { size: file.size, mtimeMs: file.mtimeMs }, message, config.sync.failure_retry_attempts, config.sync.failure_retry_interval_ms)
             failed = true
             sourceComplete = false
-            fullScanComplete = false
             failureRecorded = true
+            settledSkips++
             console.error(`warning: S3 file ${source.kind}/${file.sourcePath} failed (attempt ${retry.attemptCount}/${config.sync.failure_retry_attempts}); ${retry.exhausted ? "no automatic retry for this file version" : `next retry after ${new Date(retry.nextAttemptAt).toISOString()}`}: ${message}`)
-            break
+            // Keep scanning: one broken or perpetually hot file must not starve
+            // every file that sorts after it.
+            continue
           }
         }
-        if (!signal?.aborted && (sourceComplete || uploaded > 0 || deferredFailures > 0)) {
-          if (sourceComplete) {
-            state.recordS3SourceComplete(sourceID, snapshot.rootMtimeMs, snapshot.files.length, Math.max(0, ...snapshot.files.map((file) => file.mtimeMs)), fullScan && fullScanComplete)
-            state.clearS3Failure(sourceID, s3SourceFailurePath)
-          }
-          const incomplete = sourceComplete ? "" : ` (${deferredFailures} deferred failure${deferredFailures === 1 ? "" : "s"}; source incomplete)`
-          console.log(`uploaded ${uploaded} changed JSONL file${uploaded === 1 ? "" : "s"} from ${root}${incomplete}`)
+        if (scanCovered) {
+          // Record the scan itself: the walk enumerated the tree and every file
+          // was either hashed or deliberately deferred to its own retry. Tying
+          // this to upload success is what used to make one busy session file
+          // (or one unreachable endpoint) re-hash the whole corpus every poll.
+          state.recordS3SourceComplete(sourceID, snapshot.rootMtimeMs, snapshot.files.length, Math.max(0, ...snapshot.files.map((file) => file.mtimeMs)), fullScan)
+          if (sourceComplete) state.clearS3Failure(sourceID, s3SourceFailurePath)
+          const notes = [
+            !sourceComplete && `${deferredFailures} deferred failure${deferredFailures === 1 ? "" : "s"}; source incomplete`,
+            settledSkips > 0 && `${settledSkips} deferred (still changing)`,
+          ].filter(Boolean).join(", ")
+          console.log(`uploaded ${uploaded} changed JSONL file${uploaded === 1 ? "" : "s"} from ${root}${notes ? ` (${notes})` : ""}`)
         }
       } catch (error) {
         if (signal?.aborted) break
@@ -1008,6 +1028,10 @@ async function syncVerify() {
 async function syncStatus() {
   const config = await loadConfig(paths)
   console.log(`state: ${paths.state}`)
+  // Pacing is the first thing to check when a host looks busy: a file is hashed
+  // once it has been quiet for settle_ms, a full deep verify runs every
+  // rescan_ms, and the loop wakes every poll_ms.
+  console.log(`sync pacing: poll ${config.sync.poll_interval_ms}ms, rescan ${config.sync.rescan_interval_ms}ms, settle ${config.sync.settle_ms}ms, retry ${config.sync.failure_retry_interval_ms}ms x${config.sync.failure_retry_attempts}`)
   if (!(await access(paths.state).then(() => true).catch(() => false))) {
     console.log("pending outbox: 0")
     console.log("outbox bytes: 0")
