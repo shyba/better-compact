@@ -284,6 +284,28 @@ export class SyncState {
     return transaction()
   }
 
+  /** Clear every recorded S3 failure for one source, audited per file. Files
+   *  that exhausted their automatic retries -- for instance while an endpoint
+   *  was down, or while a bug kept re-hashing a moving file -- otherwise stay
+   *  stranded until their bytes change. */
+  clearAllS3FailuresWithAudit(sourceID: string, clearedBy: string, now = Date.now()): number {
+    const transaction = this.db.transaction(() => {
+      const rows = this.db.query("select path, size, mtime_ms, attempt_count, next_attempt_at, exhausted, last_error, updated_at from s3_failure where source_id=?").all(sourceID) as Array<{ path: string; size: number; mtime_ms: number; attempt_count: number; next_attempt_at: number; exhausted: number; last_error?: string; updated_at: number }>
+      const insert = this.db.query(`insert into s3_failure_audit(source_id, path, size, mtime_ms, attempt_count, next_attempt_at, exhausted, last_error, failure_updated_at, cleared_at, cleared_by)
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      for (const row of rows) insert.run(sourceID, row.path, row.size, row.mtime_ms, row.attempt_count, row.next_attempt_at, row.exhausted, row.last_error ?? null, row.updated_at, now, clearedBy)
+      this.db.query("delete from s3_failure where source_id=?").run(sourceID)
+      return rows.length
+    })
+    return transaction()
+  }
+
+  /** Failure clearances recorded for a source, oldest first. */
+  s3FailureAudit(sourceID: string): Array<{ path: string; clearedBy: string; clearedAt: number }> {
+    const rows = this.db.query("select path, cleared_by, cleared_at from s3_failure_audit where source_id=? order by cleared_at, path").all(sourceID) as Array<{ path: string; cleared_by: string; cleared_at: number }>
+    return rows.map((row) => ({ path: row.path, clearedBy: String(row.cleared_by), clearedAt: Number(row.cleared_at) }))
+  }
+
   hierarchyBackfillSHA(sourceID: string, path: string): string | undefined {
     const row = this.db.query("select payload_sha256 from hierarchy_backfill where source_id=? and path=?").get(sourceID, path) as { payload_sha256: string } | undefined
     return row?.payload_sha256

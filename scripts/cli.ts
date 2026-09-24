@@ -434,8 +434,10 @@ async function syncRetryS3() {
   const kind = flagValue("--kind")
   const rawPath = flagValue("--path")
   const rootOverride = flagValue("--root")
-  if (!kind || !rawPath || kind.startsWith("--") || rawPath.startsWith("--") || rootOverride?.startsWith("--")) {
+  const all = process.argv.includes("--all")
+  if (!kind || (!all && !rawPath) || kind.startsWith("--") || rawPath?.startsWith("--") || rootOverride?.startsWith("--")) {
     console.error("Usage: better-compact sync retry-s3 --kind KIND --path PATH [--root ROOT]")
+    console.error("       better-compact sync retry-s3 --kind KIND --all [--root ROOT]")
     return 2
   }
   if (kind !== "codex-jsonl" && kind !== "codex-jsonl-sessions" && kind !== "pi-jsonl") {
@@ -454,9 +456,16 @@ async function syncRetryS3() {
     }
     const root = path.resolve(candidates[0]!.database.replace(/^~(?=\/|$)/, process.env.HOME ?? "."))
     const sourceID = createHash("sha256").update(`${kind}\n${root}`).digest("hex").slice(0, 32)
-    const failurePath = rawPath === "__source__" ? s3SourceFailurePath : rawPath
+    const failurePath = !rawPath || rawPath === "__source__" ? s3SourceFailurePath : rawPath
     const state = await openSyncState(paths.state)
     try {
+      if (all) {
+        const cleared = state.clearAllS3FailuresWithAudit(sourceID, "retry-s3 --all")
+        console.log(cleared === 0
+          ? `no S3 retry failures recorded for ${kind} at ${root}`
+          : `cleared ${cleared} S3 retry failure${cleared === 1 ? "" : "s"} for ${kind} at ${root}; the next sync pass will retry those file versions`)
+        return 0
+      }
       const failure = state.s3Failure(sourceID, failurePath)
       if (!failure) { console.log(`no S3 retry failure recorded for ${kind}/${rawPath}`); return 0 }
       state.clearS3FailureWithAudit(sourceID, failurePath, "retry-s3")

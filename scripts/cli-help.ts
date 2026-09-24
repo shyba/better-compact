@@ -11,7 +11,7 @@ export const cliRoutes: Record<string, Route> = {
   'sync verify': { summary: '[S3] Check all configured sources against remote coverage.', flags: ['--json'], detail: 'Read-only. Reports archive, loaded and indexed coverage separately. Unknown coverage is not success.' },
   'sync install': { summary: 'Install and start the background sync service.' },
   'sync uninstall': { summary: 'Stop and remove the background sync service.' },
-  'sync retry-s3': { summary: '[S3] Clear one failed retry without resetting checkpoints.', values: ['--kind', '--path', '--root'], usage: '--kind KIND --path PATH [--root ROOT]', detail: 'Stop background sync first. KIND: codex-jsonl, codex-jsonl-sessions or pi-jsonl. PATH is the relative JSONL path. The next sync pass retries it.' },
+  'sync retry-s3': { summary: '[S3] Clear a failed retry without resetting checkpoints.', flags: ['--all'], values: ['--kind', '--path', '--root'], usage: '--kind KIND (--path PATH | --all) [--root ROOT]', detail: 'Stop background sync first. KIND: codex-jsonl, codex-jsonl-sessions or pi-jsonl. PATH is the relative JSONL path; --all clears every recorded failure for that source, which is how files stranded by an outage or by an exhausted retry budget are picked up again. The next sync pass retries them.' },
   'sync compact': { summary: 'Remove acknowledged local cache rows and compact SQLite.', flags: ['--yes'], usage: '--yes' },
   'sync migrate': { summary: '[Legacy Postgres] Apply mirror migrations; no-op for S3.' },
   'sync reconcile': { summary: '[Legacy Postgres] Rebuild OpenCode snapshot; no-op for S3.', detail: 'Does not verify remote S3 completeness. Use sync verify for S3 coverage.' },
@@ -91,7 +91,7 @@ export function inspectCli(input: string[]): CliInspection {
     if (seen.has(a!) && seen.has(b!)) return fail(`Choose only one of ${a} and ${b}`)
   }
   if (route === 'sync retry-s3') {
-    if (!values.has('--kind') || !values.has('--path')) return fail('--kind and --path are required')
+    if (!values.has('--kind') || (!values.has('--path') && !seen.has('--all'))) return fail('--kind and either --path or --all are required')
     if (!['codex-jsonl', 'codex-jsonl-sessions', 'pi-jsonl'].includes(values.get('--kind')!)) return fail('Unsupported S3 source kind')
   }
   if (['sync compact', 'sync prune', 'installation reset', 'installation adopt'].includes(route) && !seen.has('--yes')) return fail('--yes is required')

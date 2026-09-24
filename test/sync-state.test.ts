@@ -31,6 +31,30 @@ describe("portable better-compact state", () => {
   expect(() => validateConfig({ version: 1, sync: {}, sources: [{ kind: "fixture", database: "db", extra: true }] })).toThrow("source contains an unknown key")
   })
 
+  test("clears every recorded S3 failure for a source and audits each one", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "better-compact-state-"))
+    temporary.push(directory)
+    const state = await openSyncState(path.join(directory, "state.sqlite"))
+    state.ensureInstallation("install-1", "incarnation-1", "test")
+    state.upsertSource({ id: "source-1", installationID: "install-1", kind: "codex-jsonl", schemaVersion: 1, locator: "codex-jsonl://sessions", incarnation: "source-inc-1" })
+    state.upsertSource({ id: "source-2", installationID: "install-1", kind: "codex-jsonl", schemaVersion: 1, locator: "codex-jsonl://other", incarnation: "source-inc-2" })
+    // One exhausted version plus one still-retrying version, and a failure that
+    // belongs to another source and must survive the sweep.
+    state.recordS3Failure("source-1", "a/gone.jsonl", { size: 10, mtimeMs: 1 }, "boom", 1, 60_000, 5_000)
+    state.recordS3Failure("source-1", "b/hot.jsonl", { size: 20, mtimeMs: 2 }, "file changed during hashing; retry next pass", 3, 60_000, 5_000)
+    state.recordS3Failure("source-2", "c/other.jsonl", { size: 30, mtimeMs: 3 }, "other", 3, 60_000, 5_000)
+
+    expect(state.clearAllS3FailuresWithAudit("source-1", "retry-s3 --all", 9_000)).toBe(2)
+    expect(state.s3Failure("source-1", "a/gone.jsonl")).toBeUndefined()
+    expect(state.s3Failure("source-1", "b/hot.jsonl")).toBeUndefined()
+    expect(state.s3Failure("source-2", "c/other.jsonl")).toBeDefined()
+    const audit = state.s3FailureAudit("source-1")
+    expect(audit).toHaveLength(2)
+    expect(audit.map((row) => row.clearedBy)).toEqual(["retry-s3 --all", "retry-s3 --all"])
+    expect(state.clearAllS3FailuresWithAudit("source-1", "retry-s3 --all", 9_500)).toBe(0)
+    state.close()
+  })
+
   test("enqueues, leases, and acknowledges records transactionally", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "better-compact-state-"))
     temporary.push(directory)
