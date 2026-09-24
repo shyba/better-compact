@@ -155,7 +155,7 @@ describe("better-compact sync setup", () => {
     temporary.push(root)
     const config = path.join(root, "config.json")
     const stateHome = path.join(root, "state")
-    const databaseURL = "postgresql://writer:secret@192.168.0.31:5432/app?sslmode=disable"
+    const databaseURL = "postgresql://writer:secret@db.example.test:5432/app?sslmode=disable"
 
     const result = await runCLI(["sync", "setup", "--url-stdin", "--allow-insecure-remote"], {
       HOME: root,
@@ -179,7 +179,7 @@ describe("better-compact sync setup", () => {
       HOME: root,
       BETTER_COMPACT_CONFIG: config,
       BETTER_COMPACT_HOME: stateHome,
-      POSTGRES_HOST: "192.168.0.31",
+      POSTGRES_HOST: "db.example.test",
       POSTGRES_PORT: "5432",
       POSTGRES_DB: "app",
       DB_WRITER_USER: "writer",
@@ -190,7 +190,7 @@ describe("better-compact sync setup", () => {
     expect(result.exitCode).toBe(0)
     expect(result.stdout).not.toContain("secret")
     expect(await readFile(path.join(stateHome, "sync.env"), "utf8")).toContain(
-      "postgresql://writer:secret@192.168.0.31:5432/app?sslmode=disable",
+      "postgresql://writer:secret@db.example.test:5432/app?sslmode=disable",
     )
   })
 
@@ -199,7 +199,7 @@ describe("better-compact sync setup", () => {
     temporary.push(root)
     const config = path.join(root, "config.json")
     const stateHome = path.join(root, "state")
-    const databaseURL = "postgresql://writer:secret@192.168.0.31:5432/app?sslmode=disable"
+    const databaseURL = "postgresql://writer:secret@db.example.test:5432/app?sslmode=disable"
 
     const result = await runCLI(["sync", "setup", "--url", databaseURL], {
       HOME: root,
