@@ -50,6 +50,7 @@
     "scripts/rag_worker.py",
     "db/migrations",
     "LICENSE",
+    "docs",
     "README.md",
     "scripts/cli-help.ts",
     "scripts/sync-verify.ts"
