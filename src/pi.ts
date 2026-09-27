@@ -116,11 +116,18 @@ export default function piExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext
   }): Promise<PipelineResult | undefined> {
     const { messages, branch, sessionID, signal, ctx } = input
+    // Compaction timing. This path had no instrumentation whatsoever, which is
+    // why an 18s compaction and a 132s one were indistinguishable from outside
+    // and the only honest answer to "why is compaction slow" was a guess.
+    const t0 = performance.now()
+    const stages: Record<string, number> = {}
+    const mark = (name: string): void => { stages[name] = Math.round(performance.now() - t0) }
     if (signal.aborted) return
     const fixedPin = loadFixedPin(ctx.cwd, sessionID)
     const fixedFiles = fixedPin
       ? collectFiles(fixedPin.patterns, ctx.cwd, loadCatOptions(ctx.cwd), fixedPin.tokenBudget, fixedPin.excludeGitIgnored).files
       : []
+    mark("setup")
     const artifacts = resolved.semantic_checkpoints
       ? semanticArtifacts(fixedFiles.length ? fixedFiles : catFilesFromMessages(messages), resolved.max_semantic_source_bytes)
       : []
@@ -138,13 +145,22 @@ export default function piExtension(pi: ExtensionAPI) {
       ...(prior ? { priorSummary: { id: prior.id, ledger: prior.ledger } } : {}),
     })
     const projection = prior?.projection ? remapProjection(prior.projection, ledger) : undefined
-    const deterministic = () => ({
-      summary: buildAuthoritativeSummary({ ledger, maxBytes: resolved.max_summary_bytes }),
-      details: { ledgerDigest: ledger.digest, ledgerBytes: utf8Bytes(ledger.block), mode: resolved.vcc_mode },
-    } satisfies PipelineResult)
+    mark("ledger")
+    const deterministic = () => {
+      mark("deterministic")
+      logCompactionTiming(sessionID, stages, "offline")
+      return {
+        summary: buildAuthoritativeSummary({ ledger, maxBytes: resolved.max_summary_bytes }),
+        details: { ledgerDigest: ledger.digest, ledgerBytes: utf8Bytes(ledger.block), mode: resolved.vcc_mode },
+      } satisfies PipelineResult
+    }
     if (resolved.vcc_mode === "offline") return deterministic()
     const model = compactionModel(ctx, resolved.model)
-    if (!model) return resolved.vcc_mode === "hybrid" ? deterministic() : undefined
+    if (!model) {
+      mark("no_model")
+      logCompactionTiming(sessionID, stages, "no_model")
+      return resolved.vcc_mode === "hybrid" ? deterministic() : undefined
+    }
     let semantic: { store: SemanticStore; repository: ReturnType<typeof repositoryIdentity>; extension: ReturnType<typeof semanticPromptExtension> } | undefined
     if (artifacts.length && resolved.response_mode === "json") {
       let store: SemanticStore | undefined
@@ -158,6 +174,7 @@ export default function piExtension(pi: ExtensionAPI) {
       }
     }
     const prompt = buildCompactionPrompt(ledger, resolved.max_summary_bytes, projection, resolved.response_mode, semantic?.extension)
+    mark("prompt")
     const response = await ctx.modelRegistry.complete(
       model,
       {
@@ -175,6 +192,8 @@ export default function piExtension(pi: ExtensionAPI) {
     })
     if (signal.aborted) {
       semantic?.store.close()
+      mark("aborted")
+      logCompactionTiming(sessionID, stages, "aborted_after_model")
       return
     }
     const text = response.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n")
@@ -202,6 +221,8 @@ export default function piExtension(pi: ExtensionAPI) {
       }
     }
     summary ??= buildAuthoritativeSummary({ ledger, maxBytes: resolved.max_summary_bytes })
+    mark("render")
+    logCompactionTiming(sessionID, stages, "model")
     return { summary, usage: response.usage, details: { ledgerDigest: ledger.digest, ledgerBytes: utf8Bytes(ledger.block), mode: resolved.vcc_mode } }
   }
 
@@ -324,6 +345,22 @@ function compactionModel(ctx: ExtensionContext, spec: string): Model<Api> | unde
 
 function displayModel(model: string) {
   return model === SELECTED_MODEL ? "the selected model" : model
+}
+
+/** One line per compaction, broken down by stage. Cumulative milliseconds, so
+ *  the stages read directly as a breakdown. Best-effort by contract. */
+function logCompactionTiming(sessionID: string, stages: Record<string, number>, outcome: string): void {
+  try {
+    const entries = Object.entries(stages)
+    console.warn("opencode-safe-compaction compaction timing", {
+      sessionID,
+      outcome,
+      stages: Object.fromEntries(entries),
+      totalMs: entries.length ? entries[entries.length - 1]![1] : 0,
+    })
+  } catch {
+    // Logging is best-effort and must never affect the host.
+  }
 }
 
 function warnHook(hook: string, sessionID: string | undefined, error: unknown) {
