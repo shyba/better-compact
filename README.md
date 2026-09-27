@@ -521,9 +521,12 @@ keep the evaluator's work allocation bounded. A timeout is recorded as a
 provider error and never treated as a successful continuation or fallback.
 
 The report also includes a provider-free `offline` evaluator lane compiled from
-the deterministic candidate. This lane is evaluation evidence only: Pi
-`vcc_mode=offline` remains unavailable under the unchanged Pi core, and
-OpenCode V1 does not expose provider-free compaction.
+the deterministic candidate. This lane is evaluation evidence only: it exercises
+candidate compilation outside a host. Pi `vcc_mode=offline` **is** available and
+makes no provider call: the Pi hook returns the deterministic candidate directly,
+`usage` is optional per `compaction.md`, and `test/pi-adapter.test.ts` asserts
+`providerCalls === 0` against a `complete` stub that throws if reached. OpenCode
+V1 does not expose provider-free compaction.
 
 To measure behavior after the boundary, add `--continuation` to run one
 bounded follow-up provider turn after each accepted summary. The continuation
