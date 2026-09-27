@@ -231,7 +231,7 @@ ${list(input.ledger.data.constraints, "No explicit constraints were recovered.")
 - No decisions were inferred outside the canonical ledger.
 
 ## Current state
-${list(toolStatusLines(input.ledger.data.tool_statuses), "Recovery summary generated from bounded durable history.")}
+${list(currentStateLines(input.ledger.data), "Recovery summary generated from bounded durable history.")}
 
 ## Files
 ${list(input.ledger.data.touched_paths, "No touched paths were recovered.")}
@@ -361,6 +361,16 @@ function isTerseAcknowledgement(value: string) {
   if (!normalized) return true
   const words = normalized.split(/\s+/).filter(Boolean)
   return words.length <= 3 && words.every((word) => TERSE_ACKNOWLEDGEMENTS.has(word))
+}
+
+function currentStateLines(data: RecoveryLedgerData) {
+  const lines: string[] = []
+  const goal = resolveGoal(data.recent_requests)
+  if (goal) lines.push(`Active request: ${goal}`)
+  lines.push(...toolStatusLines(data.tool_statuses))
+  const open = data.todos.filter((todo) => todo.status !== "completed" && todo.status !== "cancelled")
+  if (open.length) lines.push(`Open todos: ${open.length} (see Next actions)`)
+  return lines
 }
 
 function toolStatusLines(statuses: RecoveryLedgerData["tool_statuses"]) {

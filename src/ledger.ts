@@ -230,8 +230,8 @@ export function buildRecoveryLedger(input: {
       if (value.type !== "tool" || typeof value.tool !== "string") continue
       const state = record(value.state)
       if (!state || typeof state.status !== "string") continue
+      const input = record(state.input)
       if (/^(write|edit|patch|apply[_-]?patch|write[_-]?file|edit[_-]?file|str_replace_editor)$/i.test(value.tool)) {
-        const input = record(state.input)
         for (const key of ["path", "filename", "filePath", "targetPath"] as const) {
           if (typeof input?.[key] === "string") addBoundedPath(touchedPaths, input[key])
         }
@@ -243,6 +243,7 @@ export function buildRecoveryLedger(input: {
         const inputSource = record(input?.source)
         if (typeof inputSource?.path === "string") addBoundedPath(touchedPaths, inputSource.path)
       }
+      collectToolInputPaths(touchedPaths, input)
       if (toolStatuses.length < LEDGER_LIMITS.tool_statuses) {
         const status: { tool: string; status: string; title?: string } = {
           tool: compact(value.tool, 96),
@@ -304,7 +305,7 @@ export function buildRecoveryLedger(input: {
     ? []
     : mergeStrings(prior?.recent_requests, userRequests, Math.min(input.tailTurns, LEDGER_LIMITS.recent_requests), 640)
   const mergedConstraints = mergeStrings(prior?.constraints, constraints, LEDGER_LIMITS.constraints, 360)
-  const mergedPaths = mergeStrings(prior?.touched_paths, [...touchedPaths], LEDGER_LIMITS.touched_paths, 512).sort()
+  const mergedPaths = mergeStrings(prior?.touched_paths, [...touchedPaths].reverse(), LEDGER_LIMITS.touched_paths, 512).sort()
   const mergedErrors = mergeStrings(prior?.errors, errors, LEDGER_LIMITS.errors, 360)
   const mergedEvidence = mergeStrings(prior?.evidence, evidence, LEDGER_LIMITS.evidence, 420)
   const mergedToolStatuses = unique([
@@ -358,13 +359,16 @@ export function buildRecoveryLedger(input: {
     next_actions: nextActions,
     legacy_context: mergedLegacy,
   }
+  // Fit order: evict the lowest resume-signal first. Bare tool statuses
+  // ("bash: completed") and provenance notes go before command outputs
+  // (evidence), which carry the actionable bytes behind the status.
   const removalOrder: Array<keyof RecoveryLedgerData> = [
-    "evidence",
     "tool_statuses",
-    "errors",
     "legacy_context",
-    "constraints",
+    "errors",
     "touched_paths",
+    "evidence",
+    "constraints",
     "todos",
     "recent_requests",
     "next_actions",
@@ -509,13 +513,38 @@ function pushReverseUnique(values: string[], seen: Set<string>, value: string, l
 function addBoundedPath(paths: Set<string>, value: string) {
   const path = compact(value.replace(/\/+$/, "") || value, 300)
   if (!isRealPath(path) || paths.has(path)) return
+  // The history scan runs newest-first, so refusing beyond the cap keeps the
+  // freshest paths; older turns are already preserved via the chained prior.
+  if (paths.size >= LEDGER_LIMITS.touched_paths) return
   paths.add(path)
-  if (paths.size <= LEDGER_LIMITS.touched_paths) return
-  let largest: string | undefined
-  for (const existing of paths) {
-    if (largest === undefined || compareText(existing, largest) > 0) largest = existing
+}
+
+// Absolute paths in tool-call arguments are agent-authored (same trust as the
+// assistant text that already feeds requests/constraints), so they are
+// eligible touched-path candidates for every tool, not just file writers.
+// Tool OUTPUTS are never scanned: they are untrusted third-party bytes and
+// must not become resume context.
+const TOOL_INPUT_PATH_SCAN_BYTES = 4_096
+const TOOL_INPUT_PATHS_PER_PART = 8
+const ABSOLUTE_PATH_LIKE = /(^|[\s"'`([{=:|>~])(~?\/[A-Za-z0-9_~][A-Za-z0-9_.\-~]*(?:\/[A-Za-z0-9_.\-]+)+)/g
+function collectToolInputPaths(paths: Set<string>, input: Record<string, unknown> | undefined) {
+  if (!input) return
+  let text: string
+  try {
+    text = JSON.stringify(input)
+  } catch {
+    return
   }
-  if (largest) paths.delete(largest)
+  const source = text.length > TOOL_INPUT_PATH_SCAN_BYTES ? text.slice(0, TOOL_INPUT_PATH_SCAN_BYTES) : text
+  let added = 0
+  for (const match of source.matchAll(ABSOLUTE_PATH_LIKE)) {
+    if (added >= TOOL_INPUT_PATHS_PER_PART) break
+    const candidate = (match[2] ?? "").replace(/[),;:'"`\]]+$/, "")
+    if (!candidate) continue
+    const before = paths.size
+    addBoundedPath(paths, candidate)
+    if (paths.size > before) added++
+  }
 }
 
 function isRealPath(path: string) {

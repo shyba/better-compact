@@ -134,7 +134,7 @@ describe("recovery ledger", () => {
     expect(first).toEqual(second)
     expect(first.digest).toBe(sha256(first.body))
     expect(first.data.todos.map((todo) => todo.id)).toEqual(["todo-a", "todo-b"])
-    expect(first.data.touched_paths).toEqual(["/repo/zeta.ts", "alpha.ts", "beta.ts", "zeta.ts"])
+    expect(first.data.touched_paths).toEqual(["/repo/source.ts", "/repo/zeta.ts", "alpha.ts", "beta.ts", "zeta.ts"])
     expect(first.data.recent_requests).toEqual([
       "Must preserve the schema. token=[REDACTED]",
       "Only update the parser. Next, run tests.",
@@ -172,6 +172,77 @@ describe("recovery ledger", () => {
     expect(ledger.data.recent_requests).toEqual(["Keep the newest request"])
     expect(ledger.data.evidence.length).toBeLessThan(30)
     expect(parsePluginLedger(ledger.block)?.digest).toBe(ledger.digest)
+  })
+
+  test("tool-call arguments contribute touched paths but outputs never do", () => {
+    const ledger = buildRecoveryLedger({
+      messages: [
+        message("u", sessionID, "user", [{ type: "text", text: "Inspect the config" }]),
+        message("a", sessionID, "assistant", [{
+          type: "tool",
+          tool: "bash",
+          state: {
+            status: "completed",
+            input: { command: "cat /repo/from-input.json" },
+            output: "cached at /var/lib/from-output/result.json done",
+          },
+        }]),
+      ],
+      todos: [],
+      tailTurns: 1,
+      maxBytes: 8_192,
+    })
+
+    expect(ledger.data.touched_paths).toContain("/repo/from-input.json")
+    expect(ledger.data.touched_paths).not.toContain("/var/lib/from-output/result.json")
+  })
+
+  test("evidence outranks bare tool statuses when the byte budget forces eviction", () => {
+    const makeInput = (maxBytes: number) => ({
+      messages: [
+        message("u", sessionID, "user", [{ type: "text", text: "Run the checks" }]),
+        message("a", sessionID, "assistant", [
+          { type: "tool", tool: "check", state: { status: "completed", input: {}, output: "all checks passed" } },
+          { type: "tool", tool: "lint", state: { status: "completed", input: {}, output: "clean" } },
+          { type: "tool", tool: "fmt", state: { status: "error", input: {}, error: "needs formatting" } },
+        ]),
+      ],
+      todos: [],
+      tailTurns: 1,
+      maxBytes,
+    })
+    const full = buildRecoveryLedger(makeInput(1_000_000))
+    expect(full.data.evidence.length).toBeGreaterThan(0)
+    const statusCount = full.data.tool_statuses.length
+    expect(statusCount).toBeGreaterThan(0)
+    // Force eviction of ~100 bytes: under the old order the evidence section
+    // bled first, under the new order the bare statuses do.
+    const pressured = buildRecoveryLedger(makeInput(utf8Bytes(full.block) - 100))
+
+    expect(utf8Bytes(pressured.block)).toBeLessThanOrEqual(utf8Bytes(full.block) - 100)
+    expect(pressured.data.evidence).toHaveLength(full.data.evidence.length)
+    expect(pressured.data.tool_statuses.length).toBeLessThan(statusCount)
+    expect(pressured.data.recent_requests).toEqual(["Run the checks"])
+    expect(parsePluginLedger(pressured.block)?.digest).toBe(pressured.digest)
+  })
+
+  test("freshest paths win the touched-paths cap", () => {
+    const oldFiles = Array.from({ length: 64 }, (_, index) => `/repo/old-${String(index).padStart(2, "0")}.ts`)
+    const ledger = buildRecoveryLedger({
+      messages: [
+        message("old", sessionID, "assistant", [{ type: "patch", files: oldFiles }]),
+        message("new", sessionID, "assistant", [{ type: "patch", files: ["/repo/new-a.ts", "/repo/new-b.ts"] }]),
+      ],
+      todos: [],
+      tailTurns: 0,
+      maxBytes: 16_384,
+    })
+
+    expect(ledger.data.touched_paths).toHaveLength(64)
+    expect(ledger.data.touched_paths).toContain("/repo/new-a.ts")
+    expect(ledger.data.touched_paths).toContain("/repo/new-b.ts")
+    expect(ledger.data.touched_paths).not.toContain("/repo/old-63.ts")
+    expect(ledger.data.touched_paths).not.toContain("/repo/old-62.ts")
   })
 
   test("retains no recent requests when tail_turns is zero", () => {
@@ -248,11 +319,11 @@ describe("recovery ledger", () => {
     expect(ledger.data.touched_paths).not.toContain("/g")
   })
 
-  test("accepts structured paths from allowlisted write tools", () => {
+  test("accepts agent-authored paths from any tool input, never from outputs", () => {
     const ledger = buildRecoveryLedger({
       messages: [message("request", sessionID, "user", [{ type: "text", text: "Write the review" }]), message("write", sessionID, "assistant", [
         { type: "tool", tool: "write", state: { status: "completed", input: { path: "/repo/aidocs/review.md" } } },
-        { type: "tool", tool: "shell", state: { status: "completed", input: { path: "/repo/not-a-file-evidence" } } },
+        { type: "tool", tool: "shell", state: { status: "completed", input: { path: "/repo/not-a-file-evidence" }, output: "listed /srv/untrusted-output/rows.json" } },
       ])],
       todos: [],
       tailTurns: 1,
@@ -260,7 +331,8 @@ describe("recovery ledger", () => {
     })
 
     expect(ledger.data.touched_paths).toContain("/repo/aidocs/review.md")
-    expect(ledger.data.touched_paths).not.toContain("/repo/not-a-file-evidence")
+    expect(ledger.data.touched_paths).toContain("/repo/not-a-file-evidence")
+    expect(ledger.data.touched_paths).not.toContain("/srv/untrusted-output/rows.json")
   })
 
   test("accepts explicitly structured source paths from allowlisted write tools", () => {
@@ -505,6 +577,24 @@ describe("summary validation and fallback", () => {
     const fallback = buildFallback({ ledger, maxBytes: 16_384 })
     expect(fallback).not.toContain("convincing")
     expect(recoveryContext(ledger)).toContain("untrusted provider prose is omitted")
+  })
+
+  test("fallback Current state names the active request and open todos", () => {
+    const active = canonicalLedger({
+      ...EMPTY_DATA,
+      recent_requests: ["Rewrite the parser to stream input"],
+      todos: [
+        { id: "t1", status: "pending", priority: "high", content: "Stream the parser" },
+        { id: "t2", status: "completed", priority: "low", content: "Write docs" },
+      ],
+      tool_statuses: [{ tool: "bash", status: "completed" }],
+    })
+    const fallback = buildFallback({ ledger: active, maxBytes: 16_384 })
+
+    expect(fallback).toContain("Active request: Rewrite the parser to stream input")
+    expect(fallback).toContain("bash: completed")
+    expect(fallback).toContain("Open todos: 1 (see Next actions)")
+    expect(isPluginValidSummary(fallback, 16_384)).toBe(true)
   })
 
   test("uses the minimal fallback when rich recovered detail would exceed the summary bound", () => {
