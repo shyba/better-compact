@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { describe, expect, test } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach } from "bun:test"
 import type { AgentMessage } from "@earendil-works/pi-agent-core"
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent"
 import { canonicalLedger, type RecoveryLedgerData } from "../src/ledger.js"
@@ -274,13 +274,99 @@ describe("priorPluginSummary", () => {
 })
 
 describe("pi option persistence", () => {
+  let sandboxHome = ""
+  beforeEach(async () => {
+    // The global fallback is pointed at an explicit per-test directory so no
+    // test can ever read the operator's real fleet default file.
+    sandboxHome = await mkdtemp(path.join(os.tmpdir(), "sc-home-"))
+  })
+  afterEach(async () => {
+    await rm(sandboxHome, { recursive: true, force: true })
+  })
+  async function writeGlobal(value: unknown) {
+    await mkdir(path.join(sandboxHome, ".pi"), { recursive: true })
+    await writeFile(path.join(sandboxHome, ".pi", "safe-compaction.json"), `${JSON.stringify(value)}\n`)
+  }
+  test("global fallback applies when the cwd file is missing", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "sc-pi-"))
+    try {
+      await writeGlobal({ vcc_mode: "offline" })
+      expect(resolveOptions(parseOptions(loadPiOptions(dir, sandboxHome))).vcc_mode).toBe("offline")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+  test("cwd file wins per key over the global fallback", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "sc-pi-"))
+    try {
+      await writeGlobal({ vcc_mode: "offline", tail_turns: 9 })
+      await mkdir(path.join(dir, ".pi"), { recursive: true })
+      await writeFile(path.join(dir, ".pi", "safe-compaction.json"), `${JSON.stringify({ vcc_mode: "hybrid" })}\n`)
+      const loaded = resolveOptions(parseOptions(loadPiOptions(dir, sandboxHome)))
+      expect(loaded.vcc_mode).toBe("hybrid")
+      expect(loaded.tail_turns).toBe(9)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+  test("invalid cwd file warns and falls through to the global file", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "sc-pi-"))
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (message?: unknown) => { warnings.push(String(message)) }
+    try {
+      await writeGlobal({ vcc_mode: "offline" })
+      await mkdir(path.join(dir, ".pi"), { recursive: true })
+      await writeFile(path.join(dir, ".pi", "safe-compaction.json"), "not json")
+      expect(resolveOptions(parseOptions(loadPiOptions(dir, sandboxHome))).vcc_mode).toBe("offline")
+      expect(warnings.some((line) => line.includes("unreadable options file"))).toBe(true)
+    } finally {
+      console.warn = originalWarn
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+  test("missing files everywhere resolve to defaults without warnings", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "sc-pi-"))
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (message?: unknown) => { warnings.push(String(message)) }
+    try {
+      expect(loadPiOptions(dir, sandboxHome)).toEqual({})
+      expect(warnings).toEqual([])
+    } finally {
+      console.warn = originalWarn
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+  test("layered conflict degrades to offline instead of crashing session start", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "sc-pi-"))
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (message?: unknown) => { warnings.push(String(message)) }
+    try {
+      await writeGlobal({ vcc_mode: "offline" })
+      await mkdir(path.join(dir, ".pi"), { recursive: true })
+      await writeFile(
+        path.join(dir, ".pi", "safe-compaction.json"),
+        `${JSON.stringify({ semantic_checkpoints: true, response_mode: "markdown" })}\n`,
+      )
+      const loaded = resolveOptions(parseOptions(loadPiOptions(dir, sandboxHome)))
+      expect(loaded.vcc_mode).toBe("offline")
+      expect(loaded.semantic_checkpoints).toBe(false)
+      expect(loaded.response_mode).toBe("json")
+      expect(warnings.some((line) => line.includes("no model calls"))).toBe(true)
+    } finally {
+      console.warn = originalWarn
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
   test("round-trips persisted options through save and load", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "sc-pi-"))
     try {
       await mkdir(path.join(dir, ".pi"), { recursive: true })
       const resolved = resolveOptions(parseOptions({ model: "test/compactor", tail_turns: 6, vcc_mode: "off" }))
       await savePiOptions(dir, resolved)
-      const loaded = resolveOptions(parseOptions(loadPiOptions(dir)))
+      const loaded = resolveOptions(parseOptions(loadPiOptions(dir, sandboxHome)))
       expect(loaded.model).toBe("test/compactor")
       expect(loaded.vcc_mode).toBe("off")
       expect(loaded.tail_turns).toBe(6)
@@ -304,7 +390,7 @@ describe("pi option persistence", () => {
         max_user_text_bytes: 12_345,
       }))
       await savePiOptions(dir, options)
-      const loaded = resolveOptions(parseOptions(loadPiOptions(dir)))
+      const loaded = resolveOptions(parseOptions(loadPiOptions(dir, sandboxHome)))
       expect(loaded).toMatchObject({
         model: "test/compactor",
         vcc_mode,
@@ -339,7 +425,7 @@ describe("pi option persistence", () => {
       await mkdir(path.join(dir, ".pi"), { recursive: true })
       const raw = `${JSON.stringify({ vcc_mode: "future-mode", model: "test/compactor" })}\n`
       await writeFile(path.join(dir, ".pi", "safe-compaction.json"), raw, { mode: 0o600 })
-      expect(loadPiOptions(dir)).toEqual({})
+      expect(loadPiOptions(dir, sandboxHome)).toEqual({})
       expect(await readFile(path.join(dir, ".pi", "safe-compaction.json"), "utf8")).toBe(raw)
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -351,7 +437,7 @@ describe("pi option persistence", () => {
     try {
       await mkdir(path.join(dir, ".pi"), { recursive: true })
       await writeFile(path.join(dir, ".pi", "safe-compaction.json"), "not json")
-      expect(loadPiOptions(dir)).toEqual({})
+      expect(loadPiOptions(dir, sandboxHome)).toEqual({})
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -359,6 +445,18 @@ describe("pi option persistence", () => {
 })
 
 describe("Pi package integration", () => {
+  let sandboxHome = ""
+  beforeEach(async () => {
+    // The hook resolves options through the global fallback: point it at a
+    // per-test directory via the namespaced override (no other suite reads
+    // this variable, so concurrent files cannot interfere).
+    sandboxHome = await mkdtemp(path.join(os.tmpdir(), "sc-int-home-"))
+    process.env.OPENCODE_SAFE_COMPACTION_GLOBAL_DIR = sandboxHome
+  })
+  afterEach(async () => {
+    delete process.env.OPENCODE_SAFE_COMPACTION_GLOBAL_DIR
+    await rm(sandboxHome, { recursive: true, force: true })
+  })
   test("declares both source-first extension entry points", () => {
     const manifest = packageJSON as {
       pi?: { extensions?: unknown }

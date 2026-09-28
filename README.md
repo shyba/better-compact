@@ -372,7 +372,17 @@ or add it to `~/.pi/agent/settings.json` packages/extensions. The extension regi
 - `session_before_tree` — the same ledger/projection pipeline for `/tree` branch summarization when the user opts into a summary.
 - `/compaction-model` — pick a dedicated compaction model or "follow selected model". The choice is persisted to `<cwd>/.pi/safe-compaction.json` (mode `0600`, atomic rename).
 
-Plugin-side options are read from `<cwd>/.pi/safe-compaction.json`:
+Plugin-side options are layered: `<cwd>/.pi/safe-compaction.json` wins per key,
+then `$HOME/.pi/safe-compaction.json` (fleet-wide default -- set
+`{"vcc_mode": "offline"}` there once per host instead of per directory),
+then built-in defaults (`vcc_mode: "off"`, i.e. the plugin steps aside and pi
+compacts natively with a model call). `OPENCODE_SAFE_COMPACTION_GLOBAL_DIR`
+overrides the global location for containers and tests. A present but
+unreadable file warns on stderr and falls through to the next layer instead
+of silently reverting to defaults. Layering can never crash session start:
+flags that require model calls (`semantic_checkpoints`, `response_mode:
+markdown`) are downgraded with a warning when combined with a no-model
+`vcc_mode`, so a fleet-wide offline default always holds.
 
 ```jsonc
 {

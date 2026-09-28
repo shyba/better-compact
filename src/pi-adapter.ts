@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs"
 import { mkdir, rename, rm, writeFile } from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import { CONFIG_DIR_NAME, type SessionEntry } from "@earendil-works/pi-coding-agent"
 import type { AgentMessage } from "@earendil-works/pi-agent-core"
@@ -193,17 +194,64 @@ export function priorPluginSummary(branch: readonly SessionEntry[]): PriorPlugin
   return undefined
 }
 
-/** Read the pi-side option file at <cwd>/.pi/safe-compaction.json. Any read or
- *  validation failure falls back to defaults so a bad file never breaks pi. */
-export function loadPiOptions(cwd: string): ParsedOptions {
+/** Read and validate one option file. Missing files are silent; present but
+ *  unreadable ones warn loudly: a typo'd hand-edit must never silently fall
+ *  back to defaults (for vcc_mode the default means pi's own model-backed
+ *  compaction, i.e. exactly the model calls the user tried to turn off). */
+function readOptionsFile(file: string): { found: boolean; options?: ParsedOptions } {
+  let raw: string
   try {
-    const raw = readFileSync(path.join(cwd, CONFIG_DIR_NAME, PI_CONFIG_FILENAME), "utf8")
-    const value = JSON.parse(raw) as unknown
-    if (!value || typeof value !== "object" || Array.isArray(value)) return {}
-    return parseOptions(value as Record<string, unknown>)
+    raw = readFileSync(file, "utf8")
   } catch {
-    return {}
+    return { found: false }
   }
+  try {
+    const value = JSON.parse(raw) as unknown
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError("expected a JSON object")
+    }
+    return { found: true, options: parseOptions(value as Record<string, unknown>) }
+  } catch (error) {
+    console.warn(
+      `opencode-safe-compaction: ignoring unreadable options file ${file}: ${error instanceof Error ? error.message : error}`,
+    )
+    return { found: true }
+  }
+}
+
+/** Layered options: <cwd>/.pi/safe-compaction.json wins per key, then
+ *  $HOME/.pi/safe-compaction.json (fleet-wide default, e.g. vcc_mode
+ *  offline on every host), then built-in defaults. */
+export function loadPiOptions(cwd: string, globalDir?: string): ParsedOptions {
+  const local = readOptionsFile(path.join(cwd, CONFIG_DIR_NAME, PI_CONFIG_FILENAME))
+  // Fleet default location, overridable for containers and tests:
+  // OPENCODE_SAFE_COMPACTION_GLOBAL_DIR > $HOME > os.homedir(). $HOME is
+  // read live (not via os.homedir(), which bun snapshots at startup) so the
+  // lookup tracks the environment of every host process.
+  const base = globalDir ?? process.env.OPENCODE_SAFE_COMPACTION_GLOBAL_DIR
+    ?? process.env.HOME ?? os.homedir()
+  const global = readOptionsFile(path.join(base, CONFIG_DIR_NAME, PI_CONFIG_FILENAME))
+  const merged: ParsedOptions = { ...global.options, ...local.options }
+  // Layering must never produce a combination resolveOptions rejects: that
+  // throw happens inside session_start and would kill the whole extension
+  // (pi then falls back to its own model-backed compaction -- the exact
+  // model calls a fleet-wide offline default was meant to prevent). A mode
+  // that performs no model calls wins over checkpoint/prose flags, loudly.
+  if (merged.vcc_mode !== undefined && merged.vcc_mode !== "off") {
+    if (merged.semantic_checkpoints === true) {
+      console.warn(
+        `opencode-safe-compaction: ignoring semantic_checkpoints=true because vcc_mode=${merged.vcc_mode} performs no model calls`,
+      )
+      merged.semantic_checkpoints = false
+    }
+    if (merged.response_mode === "markdown") {
+      console.warn(
+        `opencode-safe-compaction: ignoring response_mode=markdown because vcc_mode=${merged.vcc_mode} requires the json contract`,
+      )
+      merged.response_mode = "json"
+    }
+  }
+  return merged
 }
 
 /** Write the pi-side option file with mode 0600, atomic rename, and a lock. */
