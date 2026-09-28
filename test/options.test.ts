@@ -42,18 +42,22 @@ describe("plugin option validation", () => {
     expect(() => parseOptions({ semantic_checkpoints: "yes" })).toThrow('Option "semantic_checkpoints" must be boolean')
   })
 
-  test("keeps the legacy default and rejects confusing VCC combinations", () => {
-    expect(resolveOptions({}).vcc_mode).toBe("off")
+  test("defaults to offline so an unconfigured host never makes provider calls", () => {
+    // The default must not be "off": that hands compaction back to the host's
+    // own model-backed path, which is the call the plugin exists to prevent.
+    expect(resolveOptions({}).vcc_mode).toBe("offline")
     expect(() => resolveOptions(parseOptions({ vcc_mode: "hybrid", response_mode: "markdown" }))).toThrow(
       'Option "response_mode" must be "json" when vcc_mode is enabled',
     )
     expect(() => resolveOptions(parseOptions({ vcc_mode: "offline", semantic_checkpoints: true }))).toThrow(
       'Option "semantic_checkpoints" must be false when vcc_mode is enabled',
     )
+    // Opting back into the host's model-backed compaction stays available.
+    expect(resolveOptions(parseOptions({ vcc_mode: "off" })).vcc_mode).toBe("off")
   })
 
-  test("keeps every mode transition explicit without changing the default", () => {
-    expect(resolveOptions(parseOptions({})).vcc_mode).toBe("off")
+  test("keeps every mode transition explicit", () => {
+    expect(resolveOptions(parseOptions({})).vcc_mode).toBe("offline")
     expect(resolveOptions(parseOptions({ vcc_mode: "off" })).vcc_mode).toBe("off")
     expect(resolveOptions(parseOptions({ vcc_mode: "hybrid" })).vcc_mode).toBe("hybrid")
     expect(resolveOptions(parseOptions({ vcc_mode: "offline" })).vcc_mode).toBe("offline")
@@ -168,12 +172,16 @@ describe("plugin option precedence", () => {
     ).toThrow('Option "max_summary_bytes" must leave at least 2048 bytes for the JSON projection after ledger and rendering overhead')
   })
 
-  test("allows the legacy Markdown mode to use its prior summary margin", () => {
+  test("allows the legacy Markdown mode to use its prior summary margin only when vcc is off", () => {
     expect(() =>
       resolveOptions(
-        parseOptions({ model: "test/model", response_mode: "markdown", max_ledger_bytes: 4_096, max_summary_bytes: 8_191 }),
+        parseOptions({ model: "test/model", vcc_mode: "off", response_mode: "markdown", max_ledger_bytes: 4_096, max_summary_bytes: 8_191 }),
       ),
     ).not.toThrow()
+    // With the offline default, markdown is no longer a silently valid default.
+    expect(() => resolveOptions(parseOptions({ model: "test/model", response_mode: "markdown" }))).toThrow(
+      'Option "response_mode" must be "json" when vcc_mode is enabled',
+    )
   })
 
   test("rejects limits too small for deterministic history markers and the canonical ledger", () => {

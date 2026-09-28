@@ -360,6 +360,25 @@ describe("pi option persistence", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+  test("built-in offline default coerces a file that only sets semantic_checkpoints", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "sc-pi-"))
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (message?: unknown) => { warnings.push(String(message)) }
+    try {
+      await mkdir(path.join(dir, ".pi"), { recursive: true })
+      // No vcc_mode anywhere: the built-in default is offline, so this must
+      // degrade, never throw inside session_start.
+      await writeFile(path.join(dir, ".pi", "safe-compaction.json"), `${JSON.stringify({ semantic_checkpoints: true })}\n`)
+      const loaded = resolveOptions(parseOptions(loadPiOptions(dir, sandboxHome)))
+      expect(loaded.vcc_mode).toBe("offline")
+      expect(loaded.semantic_checkpoints).toBe(false)
+      expect(warnings.some((line) => line.includes("no model calls"))).toBe(true)
+    } finally {
+      console.warn = originalWarn
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
   test("round-trips persisted options through save and load", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "sc-pi-"))
     try {
@@ -559,6 +578,10 @@ describe("Pi package integration", () => {
       await mkdir(path.join(dir, "src"), { recursive: true })
       await writeFile(path.join(dir, "src", "pinned.rs"), "fn main() {}\n")
       await saveFixedPin(dir, { sessionId: "session-1", patterns: ["src/pinned.rs"], pinnedAt: 1 })
+        // This exercises the model-backed path, so opt out of the offline
+        // default explicitly instead of relying on it.
+        await mkdir(path.join(dir, ".pi"), { recursive: true })
+        await writeFile(path.join(dir, ".pi", "safe-compaction.json"), JSON.stringify({ vcc_mode: "off" }))
 
       const events = new Map<string, unknown[]>()
       let prompt = ""
@@ -646,7 +669,7 @@ describe("Pi package integration", () => {
       const stateFile = path.join(dir, "state.sqlite")
       process.env.BETTER_COMPACT_STATE = stateFile
       await mkdir(path.join(dir, ".pi"), { recursive: true })
-      await writeFile(path.join(dir, ".pi", "safe-compaction.json"), JSON.stringify({ semantic_checkpoints: true, max_semantic_source_bytes: 32_768 }))
+      await writeFile(path.join(dir, ".pi", "safe-compaction.json"), JSON.stringify({ vcc_mode: "off", semantic_checkpoints: true, max_semantic_source_bytes: 32_768 }))
       const events = new Map<string, unknown[]>()
       const api = {
         on(event: string, handler: unknown) { events.set(event, [...(events.get(event) ?? []), handler]) },
@@ -717,7 +740,7 @@ describe("Pi package integration", () => {
       const stateFile = path.join(dir, "state.sqlite")
       process.env.BETTER_COMPACT_STATE = stateFile
       await mkdir(path.join(dir, ".pi"), { recursive: true })
-      await writeFile(path.join(dir, ".pi", "safe-compaction.json"), JSON.stringify({ semantic_checkpoints: true }))
+      await writeFile(path.join(dir, ".pi", "safe-compaction.json"), JSON.stringify({ vcc_mode: "off", semantic_checkpoints: true }))
       const events = new Map<string, unknown[]>()
       const api = {
         on(event: string, handler: unknown) { events.set(event, [...(events.get(event) ?? []), handler]) },

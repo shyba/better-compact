@@ -49,7 +49,13 @@ export type ExistingOptions = {
 export const SELECTED_MODEL = "selected"
 
 export const DEFAULT_OPTIONS = {
-  vcc_mode: "off",
+  // Default offline, not "off". "off" means the extension steps aside and the
+  // host runs its OWN model-backed compaction -- i.e. the model call the user
+  // installed this plugin to avoid. A host that has never been configured
+  // (fresh clone, no config file, no installer run) must still make zero
+  // provider calls; opting back into model compaction is an explicit
+  // {"vcc_mode": "off"} or "hybrid" in .pi/safe-compaction.json.
+  vcc_mode: "offline",
   response_mode: "json",
   semantic_checkpoints: false,
   max_semantic_source_bytes: 262_144,

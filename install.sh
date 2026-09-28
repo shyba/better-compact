@@ -624,6 +624,20 @@ else
   say "no pi CLI and no ~/.pi/agent directory; skipping the pi target"
 fi
 
+# --- pi fleet default ---
+# Every host must resolve vcc_mode=offline in EVERY directory, and that state
+# is per-host, so it cannot be shipped in the checkout: it lives in
+# $HOME/.pi/safe-compaction.json and is written here. Absent-only -- an
+# explicit operator choice is never clobbered.
+pi_global_config=$HOME/.pi/safe-compaction.json
+if [ -f "$pi_global_config" ]; then
+  say "pi fleet default already present: $pi_global_config (left unchanged)"
+else
+  mkdir -p "$HOME/.pi"
+  (umask 077 && printf '{\n  "vcc_mode": "offline"\n}\n' > "$pi_global_config".tmp.$$ && mv -f "$pi_global_config".tmp.$$ "$pi_global_config")
+  say "wrote pi fleet default $pi_global_config (vcc_mode=offline, no model calls)"
+fi
+
 # --- codex leg: no plugin API exists; sync covers ~/.codex/sessions ---
 [ -d "$HOME/.codex" ] && say "codex detected: its sessions are covered by the sync daemon (codex-jsonl source); nothing else to install"
 

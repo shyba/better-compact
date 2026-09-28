@@ -6,7 +6,7 @@ import { CONFIG_DIR_NAME, type SessionEntry } from "@earendil-works/pi-coding-ag
 import type { AgentMessage } from "@earendil-works/pi-agent-core"
 import type { ImageContent, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai"
 import { utf8Bytes, type MessageRecord, type RecoveryLedger, type TodoRecord } from "./ledger.js"
-import { parseOptions, type ParsedOptions, type PluginOptions } from "./options.js"
+import { DEFAULT_OPTIONS, parseOptions, type ParsedOptions, type PluginOptions } from "./options.js"
 import type { ProjectedSummary } from "./projection.js"
 import { parsePluginLedger, parseProjectedSummary } from "./validation.js"
 import { CAT_INJECTION_MARKER } from "./cat-markers.js"
@@ -237,16 +237,19 @@ export function loadPiOptions(cwd: string, globalDir?: string): ParsedOptions {
   // (pi then falls back to its own model-backed compaction -- the exact
   // model calls a fleet-wide offline default was meant to prevent). A mode
   // that performs no model calls wins over checkpoint/prose flags, loudly.
-  if (merged.vcc_mode !== undefined && merged.vcc_mode !== "off") {
+  // The effective default counts too: with the built-in default being
+  // "offline", a file that sets only semantic_checkpoints must not throw.
+  const effectiveMode = merged.vcc_mode ?? DEFAULT_OPTIONS.vcc_mode
+  if (effectiveMode !== "off") {
     if (merged.semantic_checkpoints === true) {
       console.warn(
-        `opencode-safe-compaction: ignoring semantic_checkpoints=true because vcc_mode=${merged.vcc_mode} performs no model calls`,
+        `opencode-safe-compaction: ignoring semantic_checkpoints=true because vcc_mode=${effectiveMode} performs no model calls`,
       )
       merged.semantic_checkpoints = false
     }
     if (merged.response_mode === "markdown") {
       console.warn(
-        `opencode-safe-compaction: ignoring response_mode=markdown because vcc_mode=${merged.vcc_mode} requires the json contract`,
+        `opencode-safe-compaction: ignoring response_mode=markdown because vcc_mode=${effectiveMode} requires the json contract`,
       )
       merged.response_mode = "json"
     }
