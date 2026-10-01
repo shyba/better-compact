@@ -84,7 +84,34 @@ describe("portable better-compact state", () => {
     state.close()
   })
 
-  test("enqueues, leases, and acknowledges records transactionally", async () => {
+  test("re-arms exhausted S3 failures as one fresh series and audits each one", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "better-compact-state-"))
+    temporary.push(directory)
+    const state = await openSyncState(path.join(directory, "state.sqlite"))
+    state.ensureInstallation("install-1", "incarnation-1", "test")
+    state.upsertSource({ id: "source-1", installationID: "install-1", kind: "codex-jsonl", schemaVersion: 1, locator: "codex-jsonl://sessions", incarnation: "source-inc-1" })
+    // maxAttempts=1 exhausts immediately; the second failure is still retrying.
+    state.recordS3Failure("source-1", "a/gone.jsonl", { size: 10, mtimeMs: 1 }, "boom", 1, 60_000, 5_000)
+    state.recordS3Failure("source-1", "b/hot.jsonl", { size: 20, mtimeMs: 2 }, "retrying", 3, 60_000, 5_000)
+    // the durable stop this replaces: exhausted files were never due again
+    expect(state.s3FailureDue("source-1", "a/gone.jsonl", 70_000)).toBe(false)
+    expect(state.s3FailureDue("source-1", "b/hot.jsonl", 70_000)).toBe(true)
+  
+    expect(state.rearmExhaustedS3Failures("source-1", "daemon start", 90_000)).toBe(1)
+    const rearmed = state.s3Failure("source-1", "a/gone.jsonl")
+    expect(rearmed?.attemptCount).toBe(0)
+    expect(rearmed?.exhausted).toBe(false)
+    expect(state.s3FailureDue("source-1", "a/gone.jsonl", 90_000)).toBe(true)
+    // a failure inside its own series is untouched: one series at a time
+    expect(state.s3Failure("source-1", "b/hot.jsonl")?.attemptCount).toBe(1)
+    const audit = state.s3FailureAudit("source-1")
+    expect(audit).toHaveLength(1)
+    expect(audit.map((row) => row.clearedBy)).toEqual(["daemon start"])
+    // nothing exhausted means nothing to re-arm: restarting twice must not stack
+    expect(state.rearmExhaustedS3Failures("source-1", "daemon start", 91_000)).toBe(0)
+    state.close()
+  })
+    test("enqueues, leases, and acknowledges records transactionally", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "better-compact-state-"))
     temporary.push(directory)
     const state = await openSyncState(path.join(directory, "state.sqlite"))

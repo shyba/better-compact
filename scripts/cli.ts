@@ -382,6 +382,7 @@ async function syncRun(once: boolean, singlePass = false) {
   const lock = await acquireSyncLock("running sync")
   if (!lock) return 1
   let stopping = false
+  let firstPass = true
   const controller = new AbortController()
   const stop = () => { stopping = true; controller.abort() }
   process.once("SIGTERM", stop)
@@ -389,7 +390,8 @@ async function syncRun(once: boolean, singlePass = false) {
   try {
     do {
       try {
-        const progress = await syncPass(config, controller.signal, { bypassSkip: once })
+        const progress = await syncPass(config, controller.signal, { bypassSkip: once, rearmExhausted: !once && firstPass })
+          firstPass = false
         if (progress.pending === 0) await compactStateIfIdle()
         if (progress.failed && (once || singlePass)) return 1
         if (stopping || singlePass || (once && (!remoteConfigured || (!progress.progress && progress.pending === 0)))) return 0
@@ -717,6 +719,15 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
         seenRoots.add(root)
       }
       const sourceID = createHash("sha256").update(`${source.kind}\n${root}`).digest("hex").slice(0, 32)
+      // A fresh daemon process starts a fresh retry series for files whose
+      // automatic retries exhausted: restarting the service (or updating it)
+      // must be enough to recover whatever was stranded while the receiver was
+      // down or rejecting uploads. Within a running process exhaustion stays a
+      // durable stop, so a permanently failing file is still never hammered.
+      if (options.rearmExhausted) {
+        const rearmed = state.rearmExhaustedS3Failures(sourceID, "daemon start")
+        if (rearmed > 0) console.log(`re-armed ${rearmed} exhausted S3 failure${rearmed === 1 ? "" : "s"} for ${source.kind} at ${root}; retrying this pass`)
+      }
       const sourceIncarnation = state.sourceIncarnation(sourceID)
       state.upsertSource({ id: sourceID, installationID: installation.id, kind: source.kind, schemaVersion: 1, locator: root, incarnation: sourceIncarnation })
       const sourceFailure = state.s3Failure(sourceID, s3SourceFailurePath)
@@ -1611,9 +1622,13 @@ async function syncInstall(syncURL?: string) {
   await rename(`${service}.tmp-${process.pid}`, service)
   const reload = await run("systemctl", ["--user", "daemon-reload"], process.env)
   if (reload !== 0) return reload
-  const enabled = await run("systemctl", ["--user", "enable", "--now", "better-compact-sync.service"], process.env)
-  if (enabled === 0) console.log(`installed ${service}`)
-  return enabled
+  const enabled = await run("systemctl", ["--user", "enable", "better-compact-sync.service"], process.env)
+  if (enabled !== 0) return enabled
+  // restart, not enable --now: installing over an already-running daemon must
+  // swap in the new code and start a fresh retry series with no manual steps.
+  const restarted = await run("systemctl", ["--user", "restart", "better-compact-sync.service"], process.env)
+  if (restarted === 0) console.log(`installed ${service}`)
+  return restarted
 }
 
 async function launchdInstall(mode: string) {

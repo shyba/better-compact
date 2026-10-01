@@ -302,6 +302,25 @@ export class SyncState {
     return transaction()
   }
 
+  /** Re-arm exhausted S3 failures as one fresh retry series. Exhaustion is a
+   *  durable stop within a process lifetime (a permanently failing file must
+   *  never be hammered), but a restart is operator intent to try again: the
+   *  daemon re-arms on startup, so updating and restarting the service is
+   *  always enough to recover files stranded while the endpoint was down or
+   *  rejecting uploads. Audited per file like the clear paths. */
+  rearmExhaustedS3Failures(sourceID: string, rearmedBy: string, now = Date.now()): number {
+    const transaction = this.db.transaction(() => {
+      const rows = this.db.query(
+        "select path, size, mtime_ms, attempt_count, next_attempt_at, exhausted, last_error, updated_at from s3_failure where source_id=? and exhausted=1",
+      ).all(sourceID) as Array<{ path: string; size: number; mtime_ms: number; attempt_count: number; next_attempt_at: number; exhausted: number; last_error: string | null; updated_at: number }>
+      const insert = this.db.query(`insert into s3_failure_audit(source_id, path, size, mtime_ms, attempt_count, next_attempt_at, exhausted, last_error, failure_updated_at, cleared_at, cleared_by)\n        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      for (const row of rows) insert.run(sourceID, row.path, row.size, row.mtime_ms, row.attempt_count, row.next_attempt_at, row.exhausted, row.last_error ?? null, row.updated_at, now, rearmedBy)
+      this.db.query("update s3_failure set attempt_count=0, exhausted=0, next_attempt_at=? where source_id=? and exhausted=1").run(now, sourceID)
+      return rows.length
+    })
+    return transaction()
+  }
+
   /** Clear every recorded S3 failure for one source, audited per file. Files
    *  that exhausted their automatic retries -- for instance while an endpoint
    *  was down, or while a bug kept re-hashing a moving file -- otherwise stay
