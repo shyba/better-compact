@@ -36,7 +36,13 @@ export type VccOpenCodeRecallEntry = {
   payload_bytes: string
   source_digest: string
   payload_digest: string
+  /** vcc_recall invocations/results; discovery hides them unless asked. */
+  recall_traffic: boolean
 }
+
+/** Same shapes as the Pi side: a tool invocation carries the tool name, our
+ *  own results carry the kind marker (escaped when nested in a part). */
+const RECALL_TRAFFIC = /"(?:name|kind)"\s*:\s*"vcc_recall"|\\+"kind\\+"\s*:\s*\\+"vcc_recall\\+"/u
 
 export type VccOpenCodeRecallFailure =
   | "malformed_handle"
@@ -85,8 +91,49 @@ export function buildVccOpenCodeRecallIndex(input: {
         payload_bytes,
       })
       if (!verified.valid) return []
-      return [{ handle, event, source_bytes, payload_bytes, source_digest: verified.source_digest, payload_digest: verified.payload_digest }]
+      return [{
+        handle,
+        event,
+        source_bytes,
+        payload_bytes,
+        source_digest: verified.source_digest,
+        payload_digest: verified.payload_digest,
+        recall_traffic: RECALL_TRAFFIC.test(payload_bytes) || RECALL_TRAFFIC.test(source_bytes),
+      }]
     })
+}
+
+/** Repeated recall calls rebuilt and re-verified every entry each time; the
+ *  session result only changes when the message count or the last event does,
+ *  so the index is memoized on that fingerprint and rebuilt on any change. */
+const recallIndexCache = new Map<string, VccOpenCodeRecallEntry[]>()
+
+export function getVccOpenCodeRecallIndex(input: {
+  session_id: string
+  lineage_id: string
+  result: VccOpenCodeSessionResult
+}): VccOpenCodeRecallEntry[] {
+  const lastEvent = input.result.events.at(-1)
+  const fingerprint = `${input.session_id}\0${input.lineage_id}\0${input.result.events.length}\0${lastEvent?.id ?? ""}`
+  const cached = recallIndexCache.get(fingerprint)
+  if (cached) return cached
+  const entries = buildVccOpenCodeRecallIndex(input)
+  if (recallIndexCache.size > 8) recallIndexCache.clear()
+  recallIndexCache.set(fingerprint, entries)
+  return entries
+}
+
+/** Bounded readable excerpt around the strongest query match. */
+export function recallOpenCodeSnippet(entry: VccOpenCodeRecallEntry, tokens: readonly string[], max_bytes = 320) {
+  const lower = entry.payload_bytes.toLowerCase()
+  let at = -1
+  for (const token of tokens) {
+    const found = lower.indexOf(token)
+    if (found >= 0 && (at < 0 || found < at)) at = found
+  }
+  if (at < 0) return truncateUtf8(entry.payload_bytes, max_bytes)
+  const start = Math.max(0, at - Math.floor(max_bytes / 3))
+  return (start > 0 ? "..." : "") + truncateUtf8(entry.payload_bytes.slice(start), max_bytes)
 }
 
 export function resolveVccOpenCodeHandle(input: {
@@ -125,8 +172,10 @@ export function discoverVccOpenCodeHandles(input: {
   entries: VccOpenCodeRecallEntry[]
   page?: number
   max_results?: number
+  include_recall_traffic?: boolean
 }) {
   const query = input.query.trim().toLowerCase()
+  const searchable = input.include_recall_traffic ? input.entries : input.entries.filter((entry) => !entry.recall_traffic)
   const tokens = query.split(/\s+/u).filter(Boolean)
   const page = Number.isSafeInteger(input.page) && input.page! > 0 ? input.page! : 1
   const max_results = boundedResults(input.max_results)
@@ -138,12 +187,15 @@ export function discoverVccOpenCodeHandles(input: {
     })
     .filter((candidate) => candidate.score === tokens.length && tokens.length > 0)
     .sort((left, right) => right.score - left.score || left.entry.event.sequence - right.entry.event.sequence || compareCodePoints(left.entry.event.id, right.entry.event.id))
-  const start = (page - 1) * max_results
-  return {
-    total: ranked.length,
-    page,
-    total_pages: Math.max(1, Math.ceil(ranked.length / max_results)),
-    entries: ranked.slice(start, start + max_results).map((candidate) => candidate.entry),
+    const start = (page - 1) * max_results
+    const page_entries = ranked.slice(start, start + max_results).map((candidate) => candidate.entry)
+    return {
+      total: ranked.length,
+      page,
+      total_pages: Math.max(1, Math.ceil(ranked.length / max_results)),
+      // Result pagination is distinct from window coverage.
+      results_truncated: start + page_entries.length < ranked.length,
+      entries: page_entries,
   }
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { buildVccPiRecallIndex, discoverVccPiHandles, getVccPiRecallIndex, recallEntryExcerpt, recallEntrySnippet } from "../src/vcc-pi-recall.js"
 import type { SessionEntry } from "@earendil-works/pi-coding-agent"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import {
@@ -205,5 +206,99 @@ describe("Pi V1 exact recall resolver", () => {
     expect(JSON.parse(tiny.content[0]!.text)).toMatchObject({ status: "oversized" })
     const unavailable = await tool!.execute("call-3", { scope: "all", query: "retain" }, undefined, undefined, context)
     expect(JSON.parse(unavailable.content[0]!.text)).toMatchObject({ status: "unavailable", reason: "scope_unavailable" })
+  })
+})
+
+describe("Pi V1 recall performance and hygiene", () => {
+  const entry = (id: string, text: string) => ({
+    id, parentId: null, timestamp: new Date(1760000000000).toISOString(),
+    type: "message" as const,
+    message: { role: "user" as const, parts: [{ type: "text" as const, text }] },
+  })
+
+  test("indexes identical output incrementally and excludes recall traffic by default", () => {
+    const base = [entry("entry-a", "notes about the migration"), entry("entry-b", "single connection pool")]
+    const full = buildVccPiRecallIndex({ session_id: "pi-perf", branch: base })
+    const grown = [...base, entry("entry-c", "more migration work")]
+    const incremental = getVccPiRecallIndex({ session_id: "pi-perf", branch: grown })
+    const rebuilt = buildVccPiRecallIndex({ session_id: "pi-perf", branch: grown })
+    expect(incremental.entries.map((item) => item.entry_id)).toEqual(rebuilt.entries.map((item) => item.entry_id))
+    expect(incremental.lineage_id).toBe(rebuilt.lineage_id)
+    expect(incremental.complete).toBe(rebuilt.complete)
+
+    const traffic = entry("entry-t", JSON.stringify({ kind: "vcc_recall", status: "ok", note: "migration" }))
+    const index = buildVccPiRecallIndex({ session_id: "pi-perf-2", branch: [entry("entry-x", "migration note"), traffic] })
+    const hidden = discoverVccPiHandles({ query: "migration", entries: index.entries, max_results: 8 })
+    expect(hidden.total).toBe(1)
+    const shown = discoverVccPiHandles({ query: "migration", entries: index.entries, max_results: 8, include_recall_traffic: true })
+    expect(shown.total).toBe(2)
+  })
+
+  test("discovery results carry readable snippets", () => {
+    const index = buildVccPiRecallIndex({ session_id: "pi-perf-3", branch: [entry("entry-a", `${"x".repeat(400)} the pardal adapter identity bug ${"y".repeat(400)}`)] })
+    const snippet = recallEntrySnippet(index.entries[0]!, ["pardal", "adapter"])
+    expect(snippet).toContain("pardal adapter identity bug")
+    expect(snippet.length).toBeLessThan(400)
+  })
+})
+
+describe("Pi V1 recall policy, budgets and coverage", () => {
+  const entry = (id: string, message: unknown) => ({
+    id, parentId: null, timestamp: new Date(1760000000000).toISOString(),
+    type: "message" as const,
+    message,
+  })
+
+  test("excludes reasoning and provider bookkeeping by default and restores them on request", () => {
+    const message = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "visible answer about the migration" },
+        { type: "thinking", thinking: "internal chain of thought 9f3a" },
+      ],
+      usage: { total_tokens: 4242 },
+    }
+    const redacted = buildVccPiRecallIndex({ session_id: "pi-policy", branch: [entry("entry-a", message)] })
+    expect(redacted.entries[0]!.payload_bytes).toContain("visible answer")
+    expect(redacted.entries[0]!.payload_bytes).not.toContain("internal chain of thought 9f3a")
+    expect(redacted.entries[0]!.payload_bytes).not.toContain("4242")
+
+    const full = buildVccPiRecallIndex({ session_id: "pi-policy", branch: [entry("entry-a", message)], include_metadata: true })
+    expect(full.entries[0]!.payload_bytes).toContain("internal chain of thought 9f3a")
+    expect(full.entries[0]!.payload_bytes).toContain("4242")
+  })
+
+  test("oversized retrieval degrades to an excerpt with the required budget", () => {
+    const big = entry("entry-big", { role: "user", content: [{ type: "text", text: Array.from({ length: 2_000 }, (_, i) => `needle in haystack line ${i}`).join(" ") }] })
+    const index = buildVccPiRecallIndex({ session_id: "pi-budget", branch: [big] })
+    const excerpt = recallEntryExcerpt(index.entries[0]!, 512)
+    expect(excerpt.presentation).toBe("excerpt_redacted")
+    expect(excerpt.excerpt.length).toBeGreaterThan(0)
+    expect(excerpt.excerpt.length).toBeLessThanOrEqual(512)
+    expect(excerpt.required_bytes).toBeGreaterThan(512)
+    expect(excerpt.hint).toContain(String(excerpt.required_bytes))
+  })
+
+  test("result pagination reports truncation separately from window coverage", () => {
+    const branch = [entry("entry-a", { role: "user", content: [{ type: "text", text: "shared phrase one" }] }),
+      entry("entry-b", { role: "user", content: [{ type: "text", text: "shared phrase two" }] })]
+    const index = buildVccPiRecallIndex({ session_id: "pi-coverage", branch })
+    const first = discoverVccPiHandles({ query: "shared phrase", entries: index.entries, page: 1, max_results: 1 })
+    expect(first).toMatchObject({ total: 2, total_pages: 2, results_truncated: true })
+    const last = discoverVccPiHandles({ query: "shared phrase", entries: index.entries, page: 2, max_results: 1 })
+    expect(last).toMatchObject({ total: 2, page: 2, results_truncated: false })
+  })
+
+  test("cached recall is a regression guard against per-call re-indexing", () => {
+    const branch = Array.from({ length: 2_000 }, (_, i) => entry(`entry-${i}`, { role: "user", content: [{ type: "text", text: `note ${i} ${"x".repeat(400)}` }] }))
+    const started = performance.now()
+    getVccPiRecallIndex({ session_id: "pi-perf-guard", branch })
+    const cold = performance.now() - started
+    const again = performance.now()
+    getVccPiRecallIndex({ session_id: "pi-perf-guard", branch })
+    const warm = performance.now() - again
+    // A warm call must never pay the index build again; the margin is wide
+    // enough to ignore scheduling noise while catching a full rebuild.
+    expect(warm).toBeLessThan(Math.max(50, cold / 2))
   })
 })

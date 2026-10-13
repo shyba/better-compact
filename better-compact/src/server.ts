@@ -26,6 +26,7 @@ import { canonicalSerialize, rehearseVccPatch, VCC_SOURCE_INCOMPLETE_REASONS, ty
 import { isVccSuccessfulSummary, vccAttemptDigest } from "./vcc-wire.js"
 import {
   buildVccOpenCodeRecallIndex,
+  getVccOpenCodeRecallIndex,
   discoverVccOpenCodeHandles,
   renderVccOpenCodeRecallEntry,
   resolveVccOpenCodeHandle,
@@ -820,6 +821,7 @@ type VccRecallArgs = {
   max_results?: number | undefined
   max_bytes?: number | undefined
   scope?: "session" | "all" | undefined
+  include_recall_traffic?: boolean | undefined
 }
 
 async function executeVccOpenCodeRecall(input: PluginInput, args: VccRecallArgs, sessionID: string) {
@@ -845,7 +847,7 @@ async function executeVccOpenCodeRecall(input: PluginInput, args: VccRecallArgs,
     return recallToolResult("unavailable", { reason: "archive_unavailable" }, max_bytes)
   }
   if (!collected.source.complete) return recallToolResult("incomplete", { reason: collected.source.reason ?? "unknown", manifest_digest: collected.source.digest }, max_bytes)
-  const entries = buildVccOpenCodeRecallIndex({ session_id: sessionID, lineage_id: collected.source.lineage_id, result: collected })
+  const entries = getVccOpenCodeRecallIndex({ session_id: sessionID, lineage_id: collected.source.lineage_id, result: collected })
   if (entries.length === 0) return recallToolResult("unavailable", { reason: "index_unavailable", manifest_digest: collected.source.digest }, max_bytes)
 
   if (args.handle !== undefined) {
@@ -882,6 +884,7 @@ async function executeVccOpenCodeRecall(input: PluginInput, args: VccRecallArgs,
     page: discovered.page,
     total_pages: discovered.total_pages,
     total: discovered.total,
+    results_truncated: discovered.results_truncated,
     items: discovered.entries.map((entry) => ({
       handle: entry.handle,
       event_id: entry.event.id,

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { discoverVccOpenCodeHandles, recallOpenCodeSnippet } from "../src/vcc-opencode-recall.js"
 import type { MessageRecord } from "../src/ledger.js"
 import { canonicalSerialize } from "../src/vcc.js"
 import { collectVccOpenCodeSession } from "../src/vcc-opencode-session.js"
@@ -89,5 +90,40 @@ describe("OpenCode V1 exact recall resolver", () => {
     const body = JSON.parse(result.candidate!.bytes) as { recall_handles: string[] }
     const changed = { ...result.candidate!, bytes: canonicalSerialize({ ...body, recall_handles: [] }) }
     expect(vccOpenCodeArchiveManifestDigest(changed, session_id, lineage_id)).not.toBe(digest)
+  })
+})
+
+describe("OpenCode recall hygiene", () => {
+  const entry = (id: string, content: string, recallTraffic = false) => ({
+    handle: `handle-${id}`,
+    event: {
+      id: `ev:opencode-v1:${id}~0`, kind: "message", content, provenance: "authoritative",
+      source_location: `opencode-v1:message:${id}`, sequence: 0,
+    },
+    source_bytes: JSON.stringify({ content }),
+    payload_bytes: JSON.stringify({ content, note: content }),
+    source_digest: "s", payload_digest: "p",
+    recall_traffic: recallTraffic,
+  }) as unknown as import("../src/vcc-opencode-recall.js").VccOpenCodeRecallEntry
+
+  test("excludes recall traffic from discovery unless requested", () => {
+    const entries = [entry("a", "the pardal adapter identity bug"), entry("b", JSON.stringify({ kind: "vcc_recall", status: "ok" }), true)]
+    const hidden = discoverVccOpenCodeHandles({ query: "pardal identity", entries, max_results: 8 })
+    expect(hidden.total).toBe(1)
+    const shown = discoverVccOpenCodeHandles({ query: "vcc_recall", entries, max_results: 8, include_recall_traffic: true })
+    expect(shown.total).toBe(1)
+  })
+
+  test("reports result truncation and carries readable snippets", () => {
+    const entries = [
+      entry("a", `context words ${"padding ".repeat(60)} the gd32 route group repeat`),
+      entry("b", "context words second candidate"),
+    ]
+    const first = discoverVccOpenCodeHandles({ query: "context words", entries, page: 1, max_results: 1 })
+    expect(first).toMatchObject({ total: 2, results_truncated: true })
+    const second = discoverVccOpenCodeHandles({ query: "context words", entries, page: 2, max_results: 1 })
+    expect(second).toMatchObject({ page: 2, results_truncated: false })
+    const snippet = recallOpenCodeSnippet(entries[0]!, ["gd32", "route"])
+    expect(snippet).toContain("gd32 route group repeat")
   })
 })
