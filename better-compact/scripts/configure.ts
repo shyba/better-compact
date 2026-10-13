@@ -111,10 +111,16 @@ async function configure() {
     ? tupleOptions(installedSafeCompaction.spec, target.file)
     : undefined
   const selectedModel = modelExplicit || typeof currentOptions?.model !== "string" ? model : currentOptions.model
+  // The OpenCode V1 plugin API cannot host provider-free compaction, so a
+  // managed tuple always carries an explicit supported vcc_mode. Without it
+  // the plugin resolves its offline-by-default and its own preflight rejects
+  // activation ("vcc_mode=offline is unsupported by the OpenCode V1 plugin
+  // API"), which is exactly what an unconfigured install must not hit.
   const options = currentOptions
-    ? { ...currentOptions, model: selectedModel }
+    ? { vcc_mode: "off", ...currentOptions, model: selectedModel }
     : {
       model: selectedModel,
+      vcc_mode: "off",
       tail_turns: 4,
       preserve_recent_tokens: 16_000,
       reserved_tokens: 32_000,

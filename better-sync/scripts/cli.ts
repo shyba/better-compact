@@ -149,12 +149,27 @@ function machineWorkerToken(statePath: string) {
 async function update() {
   const mode = await installationMode()
   if (mode !== "git") {
-    console.error(`${mode} execution is not self-updating; use the package manager to upgrade, then run better-compact install from a stable package location`)
+    console.error(`${mode} execution is not self-updating; use the package manager to upgrade, then run better-sync install from a stable package location`)
     return 2
   }
-  await access(path.join(installDir, "install.sh"))
-  const result = await run("sh", [path.join(installDir, "install.sh")], process.env)
+  // install.sh ships with this (better-sync) package and orchestrates both.
+  const syncRoot = path.resolve(path.dirname(process.argv[1] ?? "."), "..")
+  await access(path.join(syncRoot, "install.sh"))
+  const result = await run("sh", [path.join(syncRoot, "install.sh")], process.env)
   return result
+}
+
+/** The VCC compaction lives in its own package (better-compact) so it can be
+ *  installed on its own. Resolve it from the explicit override, from the
+ *  managed checkout, or from the sibling workspace directory. */
+function compactionRoot() {
+  const explicit = process.env.BETTER_COMPACT_DIR ?? process.env.OPENCODE_SAFE_COMPACTION_PACKAGE_DIR
+  if (explicit) return path.resolve(explicit)
+  const checkout = path.resolve(installDir, "better-compact")
+  if (existsSync(path.join(checkout, "package.json"))) return checkout
+  const sibling = path.resolve(path.dirname(process.argv[1] ?? "."), "..", "..", "better-compact")
+  if (existsSync(path.join(sibling, "package.json"))) return sibling
+  return checkout
 }
 
 async function activate() {
@@ -164,7 +179,7 @@ async function activate() {
     console.error("npx is ephemeral; materialize the package to a stable path before activation")
     return 2
   }
-  const packageRoot = path.resolve(path.dirname(process.argv[1] ?? "."), "..")
+  const packageRoot = compactionRoot()
   const bun = process.env.OPENCODE_SAFE_COMPACTION_BUN ?? process.execPath
   const configure = path.join(packageRoot, "scripts", "configure.ts")
   const environment = {
@@ -205,7 +220,7 @@ async function piPackageRegistered() {
       if (entry.includes("better-compact") || entry.includes("safe-compaction")) return true
       if (entry.startsWith("git:") || entry.startsWith("npm:") || entry.startsWith("http")) return false
       try {
-        return path.resolve(piAgentDirectory, entry) === path.resolve(installDir)
+        return path.resolve(piAgentDirectory, entry) === path.resolve(compactionRoot())
       } catch {
         return false
       }
@@ -237,7 +252,7 @@ async function installPi() {
   const mode = await installationMode()
   const source = piSource(mode)
   if (!source) return 2
-  console.log(`Installing safe-compaction Pi extensions from ${source}`)
+  console.log(`Installing better-compact Pi extensions from ${source}`)
   const status = await run(pi, ["install", source], process.env)
   if (status === 0) await removeGeneratedPiShims()
   return status
@@ -250,8 +265,8 @@ function piSource(mode: Awaited<ReturnType<typeof installationMode>>) {
     console.error("npx is ephemeral; set OPENCODE_SAFE_COMPACTION_PI_SOURCE to a Git or npm Pi package source")
     return undefined
   }
-  if (mode === "git") return installDir
-  return path.resolve(path.dirname(process.argv[1] ?? "."), "..")
+  // The Pi extensions ship in the better-compact package.
+  return compactionRoot()
 }
 
 function packageSource(source: string) {
@@ -1262,7 +1277,7 @@ async function syncMigrate() {
     await applyRemoteMigration(client, await readFile(path.resolve(path.dirname(process.argv[1] ?? "."), "..", "db/migrations/001_init.sql"), "utf8"))
     await applyRemoteMigration(client, await readFile(path.resolve(path.dirname(process.argv[1] ?? "."), "..", "db/migrations/004_reconcile_prefix_index.sql"), "utf8"))
     await applyRemoteMigration(client, await readFile(path.resolve(path.dirname(process.argv[1] ?? "."), "..", "db/migrations/006_tombstone_purge_indexes.sql"), "utf8"))
-    console.log("applied better-compact Postgres schema, reconciliation, and tombstone-purge index migrations")
+    console.log("applied better-sync Postgres schema, reconciliation, and tombstone-purge index migrations")
     return 0
   } finally {
     await client.close()

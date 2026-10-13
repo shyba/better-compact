@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { Database } from "bun:sqlite"
-import { redact, truncateUtf8, utf8Bytes } from "./ledger.js"
+import { redact, truncateUtf8, utf8Bytes } from "./text.js"
 import type { NormalizedRecord } from "./sync-state.js"
 
 const REQUIRED_COLUMNS = {

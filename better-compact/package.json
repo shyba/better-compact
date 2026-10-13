@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "better-compact",
+  "version": "0.1.0",
+  "description": "Bounded, validated VCC recovery compaction for OpenCode V1 and Pi",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "bun@1.3.14",
+  "engines": {
+    "bun": ">=1.3.14",
+    "opencode": ">=1.18.4 <1.19.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/pi.ts", "./src/cat.ts"]
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    },
+    "./pi": {
+      "types": "./dist/pi.d.ts",
+      "import": "./dist/pi.js"
+    },
+    "./cat": {
+      "types": "./dist/cat.d.ts",
+      "import": "./dist/cat.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "scripts/configure.ts",
+    "runtime",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "test": "bun test",
+    "build:runtime": "bun build src/index.ts --outfile runtime/server.js --target bun --format esm --minify-whitespace && bun build src/tui.ts --outfile runtime/tui.js --target bun --format esm --minify-whitespace",
+    "build:js": "bun run build:runtime && bun build src/index.ts --outfile dist/index.js --target bun --format esm && bun build src/tui.ts --outfile dist/tui.js --target bun --format esm && bun build src/pi.ts --outfile dist/pi.js --target bun --format esm --external '@earendil-works/pi-*' && bun build src/cat.ts --outfile dist/cat.js --target bun --format esm --external '@earendil-works/pi-*'",
+    "build:types": "tsc --emitDeclarationOnly",
+    "build": "bun run build:js && bun run build:types",
+    "eval": "bun test eval",
+    "prepack": "bun run build"
+  },
+  "dependencies": {
+    "zod": "^4.1.8"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.84.0",
+    "@earendil-works/pi-ai": "0.84.0",
+    "@earendil-works/pi-coding-agent": "0.84.0",
+    "@opencode-ai/plugin": "1.18.4",
+    "@types/bun": "1.3.14",
+    "jiti": "^2.4.2",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=0.84.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.0",
+    "@earendil-works/pi-ai": ">=0.84.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
+  }
+}

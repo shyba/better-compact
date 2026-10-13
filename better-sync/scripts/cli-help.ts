@@ -32,16 +32,16 @@ const globals = ['--config', '--state']
 const groups = new Set(['', 'sync', 'rag', 'rag tunnel', 'installation'])
 export function cliHelp(route = ''): string {
   const spec = cliRoutes[route]
-  const lines = [`better-compact${route ? ` ${route}` : ''}`, '']
+  const lines = [`better-sync${route ? ` ${route}` : ''}`, '']
   if (spec) {
-    lines.push(spec.summary, '', `Usage: better-compact ${route}${spec.usage ? ` ${spec.usage}` : ''} [options]`)
+    lines.push(spec.summary, '', `Usage: better-sync ${route}${spec.usage ? ` ${spec.usage}` : ''} [options]`)
     if (spec.detail) lines.push('', spec.detail)
     const options = [...(spec.flags ?? []), ...(spec.values ?? []).map(flag => `${flag} VALUE`)]
     if (options.length) lines.push('', 'Options:', ...options.map(option => `  ${option}`))
   } else if (!route) {
-    lines.push('Session sync:', '  sync          Upload, inspect and verify session archives', '', 'Plugin maintenance:', '  install [pi]  Activate OpenCode or Pi extensions', '  update        Update the managed installation', '  doctor        Check installation and sources', '  installation  Explicit identity recovery', '', 'Legacy tools:', '  rag           Separate Postgres embedding pipeline; not VCC', '', 'Use better-compact sync --help for sync commands.')
+    lines.push('Session sync:', '  sync          Upload, inspect and verify session archives', '', 'Plugin maintenance:', '  install [pi]  Activate OpenCode or Pi extensions', '  update        Update the managed installation', '  doctor        Check installation and sources', '  installation  Explicit identity recovery', '', 'Legacy tools:', '  rag           Separate Postgres embedding pipeline; not VCC', '', 'Use better-sync sync --help for sync commands.')
   } else {
-    lines.push(`Usage: better-compact ${route} <command> [options]`, '')
+    lines.push(`Usage: better-sync ${route} <command> [options]`, '')
     for (const [name, entry] of Object.entries(cliRoutes)) {
       if (name.startsWith(`${route} `)) lines.push(`  ${name.slice(route.length + 1).padEnd(20)} ${entry.summary}`)
     }
@@ -76,7 +76,7 @@ export function inspectCli(input: string[]): CliInspection {
   }
   const route = words.join(' ')
   const spec = cliRoutes[route]
-  const fail = (message: string): CliInspection => ({ kind: 'error', code: 2, text: `${message}\nUse better-compact${route && (spec || groups.has(route)) ? ` ${route}` : ''} --help.` })
+  const fail = (message: string): CliInspection => ({ kind: 'error', code: 2, text: `${message}\nUse better-sync${route && (spec || groups.has(route)) ? ` ${route}` : ''} --help.` })
   // Help takes precedence over incomplete flags, but never accepts unknown routes.
   if (help) return spec || groups.has(route) ? { kind: 'help', code: 0, text: cliHelp(route) } : fail(`Unknown command: ${route}`)
   if (error) return fail(error)

@@ -18,6 +18,9 @@ describe("better-compact Pi installation", () => {
     temporary.push(root)
     const install = path.join(root, "safe-compaction")
     await mkdir(path.join(install, ".git"), { recursive: true })
+    // a managed checkout carries the compaction package in its own subfolder
+    await mkdir(path.join(install, "better-compact"), { recursive: true })
+    await Bun.write(path.join(install, "better-compact", "package.json"), "{}")
     const log = path.join(root, "pi.log")
     const pi = await fakePi(root)
 
@@ -29,8 +32,8 @@ describe("better-compact Pi installation", () => {
     })
 
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain(`Installing safe-compaction Pi extensions from ${install}`)
-    expect(await readFile(log, "utf8")).toBe(`--version\ninstall ${install}\n`)
+    expect(result.stdout).toContain(`Installing better-compact Pi extensions from ${install}/better-compact`)
+    expect(await readFile(log, "utf8")).toBe(`--version\ninstall ${install}/better-compact\n`)
   })
 
   test("requires an explicit package source from npx", async () => {
@@ -59,6 +62,9 @@ describe("better-compact Pi installation", () => {
     temporary.push(root)
     const install = path.join(root, "safe-compaction")
     await mkdir(path.join(install, ".git"), { recursive: true })
+    // a managed checkout carries the compaction package in its own subfolder
+    await mkdir(path.join(install, "better-compact"), { recursive: true })
+    await Bun.write(path.join(install, "better-compact", "package.json"), "{}")
     const extensions = path.join(root, ".pi/agent/extensions")
     await mkdir(extensions, { recursive: true })
     const shim = path.join(extensions, "safe-compaction.ts")
@@ -82,6 +88,9 @@ describe("better-compact Pi installation", () => {
     temporary.push(root)
     const install = path.join(root, "safe-compaction")
     await mkdir(path.join(install, ".git"), { recursive: true })
+    // a managed checkout carries the compaction package in its own subfolder
+    await mkdir(path.join(install, "better-compact"), { recursive: true })
+    await Bun.write(path.join(install, "better-compact", "package.json"), "{}")
     const extensions = path.join(root, ".pi/agent/extensions")
     await mkdir(extensions, { recursive: true })
     const shim = path.join(extensions, "safe-compaction.ts")

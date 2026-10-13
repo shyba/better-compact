@@ -329,10 +329,10 @@ finish() {
       OPENCODE_SAFE_COMPACTION_ACTION=rollback \
       OPENCODE_SAFE_COMPACTION_STATE_FILE=$state_file \
       OPENCODE_SAFE_COMPACTION_CONFIG_DIR=$config_dir \
-      OPENCODE_SAFE_COMPACTION_DIR=$install_dir \
+      OPENCODE_SAFE_COMPACTION_DIR=$install_dir/better-compact \
       OPENCODE_SAFE_COMPACTION_MODEL=$model \
       OPENCODE_SAFE_COMPACTION_MODEL_EXPLICIT=$model_explicit \
-        "$bun_bin" "$install_dir/scripts/configure.ts" || {
+        "$bun_bin" "$install_dir/better-compact/scripts/configure.ts" || {
           rollback_failed=1
           config_rollback_failed=1
         }
@@ -456,11 +456,11 @@ fi
 if [ "$opencode_ok" -eq 1 ]; then
 OPENCODE_SAFE_COMPACTION_STATE_FILE=$state_file \
 OPENCODE_SAFE_COMPACTION_CONFIG_DIR=$config_dir \
-OPENCODE_SAFE_COMPACTION_DIR=$install_dir \
+OPENCODE_SAFE_COMPACTION_DIR=$install_dir/better-compact \
 OPENCODE_SAFE_COMPACTION_MODEL=$model \
 OPENCODE_SAFE_COMPACTION_MODEL_EXPLICIT=$model_explicit \
 OPENCODE_SAFE_COMPACTION_VERIFY_DIR=$verification_config_dir \
-  "$bun_bin" "$install_dir/scripts/configure.ts"
+  "$bun_bin" "$install_dir/better-compact/scripts/configure.ts"
 [ -r "$verification_config_dir/model" ] || fail "plugin configuration did not report its effective model"
 IFS= read -r model < "$verification_config_dir/model" || fail "could not read the effective compaction model"
 else
@@ -491,7 +491,7 @@ debug_config() {
   XDG_DATA_HOME="$transaction_dir/xdg-data" \
   XDG_CACHE_HOME="$transaction_dir/xdg-cache" \
   XDG_STATE_HOME="$transaction_dir/xdg-state" \
-  OPENCODE_SAFE_COMPACTION_DIR="$install_dir" \
+  OPENCODE_SAFE_COMPACTION_DIR="$install_dir/better-compact" \
   OPENCODE_SAFE_COMPACTION_MODEL="$model" \
   OPENCODE_SAFE_COMPACTION_MODEL_EXPLICIT="$model_explicit" \
   OPENCODE_SAFE_COMPACTION_VERIFY_PHASE="$debug_phase" \
@@ -513,10 +513,10 @@ verify_debug_output() {
     OPENCODE_SAFE_COMPACTION_VERIFY_PHASE=$verify_phase \
     OPENCODE_SAFE_COMPACTION_VERIFY_DIR=$verification_config_dir \
     OPENCODE_SAFE_COMPACTION_CONFIG_DIR=$config_dir \
-    OPENCODE_SAFE_COMPACTION_DIR=$install_dir \
+    OPENCODE_SAFE_COMPACTION_DIR=$install_dir/better-compact \
     OPENCODE_SAFE_COMPACTION_MODEL=$model \
     OPENCODE_SAFE_COMPACTION_MODEL_EXPLICIT=$model_explicit \
-    "$bun_bin" "$install_dir/scripts/configure.ts" >/dev/null
+    "$bun_bin" "$install_dir/better-compact/scripts/configure.ts" >/dev/null
 }
 
 debug_output=$(debug_config isolated) || fail "OpenCode could not load the isolated plugin configuration"
@@ -529,10 +529,10 @@ verify_debug_output target "$debug_output" || fail "OpenCode failed verification
 OPENCODE_SAFE_COMPACTION_ACTION=commit \
 OPENCODE_SAFE_COMPACTION_STATE_FILE=$state_file \
 OPENCODE_SAFE_COMPACTION_CONFIG_DIR=$config_dir \
-OPENCODE_SAFE_COMPACTION_DIR=$install_dir \
+OPENCODE_SAFE_COMPACTION_DIR=$install_dir/better-compact \
 OPENCODE_SAFE_COMPACTION_MODEL=$model \
 OPENCODE_SAFE_COMPACTION_MODEL_EXPLICIT=$model_explicit \
-  "$bun_bin" "$install_dir/scripts/configure.ts"
+  "$bun_bin" "$install_dir/better-compact/scripts/configure.ts"
 fi
 transaction_active=0
 
@@ -556,10 +556,10 @@ install_cli_wrapper() {
   printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
-    "cli=\"$install_dir/scripts/cli.ts\"" \
-    "if [ ! -f \"\$cli\" ] && [ -f \"$fallback_install_dir/scripts/cli.ts\" ]; then cli=\"$fallback_install_dir/scripts/cli.ts\"; fi" \
-    "if [ ! -f \"\$cli\" ] && [ -f \"$legacy_fallback_install_dir/scripts/cli.ts\" ]; then cli=\"$legacy_fallback_install_dir/scripts/cli.ts\"; fi" \
-    "if [ ! -f \"\$cli\" ]; then echo \"better-compact: installed CLI source is missing; rerun the installer\" >&2; exit 1; fi" \
+    "cli=\"$install_dir/better-sync/scripts/cli.ts\"" \
+    "if [ ! -f \"\$cli\" ] && [ -f \"$fallback_install_dir/better-sync/scripts/cli.ts\" ]; then cli=\"$fallback_install_dir/better-sync/scripts/cli.ts\"; fi" \
+    "if [ ! -f \"\$cli\" ] && [ -f \"$legacy_fallback_install_dir/better-sync/scripts/cli.ts\" ]; then cli=\"$legacy_fallback_install_dir/better-sync/scripts/cli.ts\"; fi" \
+    "if [ ! -f \"\$cli\" ]; then echo \"better-sync: installed CLI source is missing; rerun the installer\" >&2; exit 1; fi" \
     "exec \"$persistent_bun\" \"\$cli\" \"\$@\"" > "$cli_temp"
   chmod 755 "$cli_temp"
   mv -f "$cli_temp" "$cli_wrapper"
@@ -594,7 +594,7 @@ fi
 pi_ext_dir=$HOME/.pi/agent/extensions
 legacy_pi_shim=$pi_ext_dir/safe-compaction.ts
 if [ -n "$pi_bin" ] && [ -x "$pi_bin" ]; then
-  if "$pi_bin" install "$install_dir"; then
+  if "$pi_bin" install "$install_dir/better-compact"; then
     say "installed as a pi package (entry points: src/pi.ts, src/cat.ts)"
     # Two extension sources registering the same tool name make Pi refuse the
     # session, so drop the shims this installer generated earlier. Foreign
@@ -608,13 +608,13 @@ if [ -n "$pi_bin" ] && [ -x "$pi_bin" ]; then
     done
     say "restart any running pi session to load it"
   else
-    say "pi package install failed; run it yourself: pi install $install_dir"
+    say "pi package install failed; run it yourself: pi install $install_dir/better-compact"
   fi
 elif [ -d "$HOME/.pi/agent" ]; then
   mkdir -p "$pi_ext_dir"
   for pi_entry in pi cat; do
     pi_shim=$pi_ext_dir/safe-compaction-$pi_entry.ts
-    printf 'export { default } from "%s/src/%s.ts";\n' "$install_dir" "$pi_entry" > "$pi_shim.tmp.$$"
+    printf 'export { default } from "%s/src/%s.ts";\n' "$install_dir/better-compact" "$pi_entry" > "$pi_shim.tmp.$$"
     mv -f "$pi_shim.tmp.$$" "$pi_shim"
   done
   rm -f "$legacy_pi_shim"

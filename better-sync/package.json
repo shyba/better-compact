@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "better-sync",
+  "version": "0.1.0",
+  "description": "Session sync CLI and services: S3 upload, coverage verify, background sync daemon, legacy Postgres mirror and RAG worker",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "bun@1.3.14",
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "keywords": ["pi-package"],
+  "bin": {
+    "better-sync": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "scripts/cli.ts",
+    "scripts/cli-help.ts",
+    "scripts/sync-verify.ts",
+    "scripts/rag_worker.py",
+    "db/migrations",
+    "install.sh",
+    "install-sync-only.sh",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "test": "bun test",
+    "build:js": "bun build scripts/cli.ts --outfile dist/cli.js --target bun --format esm",
+    "build:types": "tsc --emitDeclarationOnly",
+    "build": "bun run build:js && bun run build:types",
+    "prepack": "bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  }
+}

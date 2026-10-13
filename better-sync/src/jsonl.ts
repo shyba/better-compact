@@ -3,7 +3,7 @@ import { readdir, stat } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import path from "node:path"
 import { createInterface } from "node:readline"
-import { redact, truncateUtf8, utf8Bytes } from "./ledger.js"
+import { redact, truncateUtf8, utf8Bytes } from "./text.js"
 import type { NormalizedRecord } from "./sync-state.js"
 
 export type JsonlFileCheckpoint = {

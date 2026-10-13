@@ -26,7 +26,7 @@ test('actual CLI help and invalid options never load state or run services', asy
     for (const route of Object.keys(cliRoutes)) {
       const help = await run([...route.split(' '), '--help'])
       expect(help.code).toBe(0)
-      expect(help.stdout).toContain(`better-compact ${route}`)
+      expect(help.stdout).toContain(`better-sync ${route}`)
       expect(help.stderr).toBe('')
       const invalid = await run([...route.split(' '), '--unknown-option'])
       expect(invalid.code).toBe(2)

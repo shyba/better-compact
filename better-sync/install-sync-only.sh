@@ -64,8 +64,8 @@ cd "$install_dir" || fail "install dir vanished"
 
 # sync setup + systemd user wiring (no OpenCode anywhere)
 # shellcheck disable=SC2086
-"$bun_bin" scripts/cli.ts sync setup $SYNC_ONLY_ARGS || fail "sync setup failed (supply --url/--token or the sync env)"
-"$bun_bin" scripts/cli.ts sync install || fail "sync install failed"
-"$bun_bin" scripts/cli.ts sync status || say "sync status unavailable; check 'bun scripts/cli.ts sync status' later"
+"$bun_bin" better-sync/scripts/cli.ts sync setup $SYNC_ONLY_ARGS || fail "sync setup failed (supply --url/--token or the sync env)"
+"$bun_bin" better-sync/scripts/cli.ts sync install || fail "sync install failed"
+"$bun_bin" better-sync/scripts/cli.ts sync status || say "sync status unavailable; check 'bun better-sync/scripts/cli.ts sync status' later"
 
 say "done: sync daemon installed (systemd --user). OpenCode compaction hooks were NOT installed (no OpenCode on this host)."

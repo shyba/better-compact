@@ -5,6 +5,8 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 
 const temporary: string[] = []
+// The VCC compaction ships in its own package next to this one.
+const compactRoot = path.resolve(process.cwd(), "..", "better-compact")
 
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map((item) => rm(item, { recursive: true, force: true })))
@@ -15,8 +17,8 @@ describe("installer", () => {
     const root = await directory()
     const home = path.join(root, "home")
     const configHome = path.join(root, "config-home")
-    const server = pathToFileURL(path.join(process.cwd(), "runtime/server.js")).href
-    const tui = pathToFileURL(path.join(process.cwd(), "runtime/tui.js")).href
+    const server = pathToFileURL(path.join(compactRoot, "runtime/server.js")).href
+    const tui = pathToFileURL(path.join(compactRoot, "runtime/tui.js")).href
     const result = await command(
       [
         process.execPath,
@@ -201,7 +203,7 @@ describe("installer", () => {
     const install = path.join(root, "managed-install")
     const legacy = path.join(root, "legacy", "safe-compaction")
     await prepareInstall(install)
-    await prepareInstall(legacy)
+    await prepareLegacyInstall(legacy)
     const file = path.join(config, "opencode.jsonc")
     const previousSource = path.join(legacy, "src/index.ts")
     await Bun.write(
@@ -338,8 +340,8 @@ describe("installer", () => {
     const root = await directory()
     const config = path.join(root, "config")
     const install = path.join(root, "install")
-    await cp(path.join(process.cwd(), "runtime"), path.join(install, "runtime"), { recursive: true })
-    await Bun.write(path.join(install, "runtime/server.js"), source)
+    await cp(path.join(compactRoot, "runtime"), path.join(install, "better-compact", "runtime"), { recursive: true })
+    await Bun.write(path.join(install, "better-compact", "runtime/server.js"), source)
 
     const result = await configure(config, install)
     expect(result.exitCode).not.toBe(0)
@@ -355,8 +357,8 @@ describe("installer", () => {
     await Bun.write(path.join(config, "opencode.jsonc"), '{\n  "theme": "system"\n}\n')
     const environment = configureEnvironment(config, install)
     const [first, second] = await Promise.all([
-      command([process.execPath, path.join(process.cwd(), "scripts/configure.ts")], environment),
-      command([process.execPath, path.join(process.cwd(), "scripts/configure.ts")], environment),
+      command([process.execPath, path.join(compactRoot, "scripts/configure.ts")], environment),
+      command([process.execPath, path.join(compactRoot, "scripts/configure.ts")], environment),
     ])
 
     expect([first.exitCode, second.exitCode]).toEqual([0, 0])
@@ -388,7 +390,7 @@ describe("installer", () => {
   test("does not treat an existing HTTP origin as equivalent to HTTPS", async () => {
     const root = await directory()
     const install = path.join(root, "install")
-    expect((await command(["git", "clone", "--quiet", process.cwd(), install])).exitCode).toBe(0)
+    expect((await command(["git", "clone", "--quiet", path.resolve(process.cwd(), ".."), install])).exitCode).toBe(0)
     expect(
       (await command(["git", "remote", "set-url", "origin", "http://github.com/shyba/opencode-better-compact-plugin.git"], process.env, install)).exitCode,
     ).toBe(0)
@@ -536,7 +538,7 @@ exit 1
     const legacy = path.join(root, "legacy", "safe-compaction")
     const config = path.join(root, "config")
     const file = path.join(config, "opencode.json")
-    await prepareInstall(legacy)
+    await prepareLegacyInstall(legacy)
     const original = JSON.stringify({
       theme: "system",
       plugin: [[path.join(legacy, "src/index.ts"), { model: "opencode-go/glm-5.2", tail_turns: 6 }]],
@@ -902,22 +904,22 @@ exit 1
     const install = path.join(root, "installed")
     const config = path.join(root, "config")
     const fakeOpenCode = path.join(root, "opencode")
-    expect((await command(["git", "clone", "--quiet", process.cwd(), origin])).exitCode).toBe(0)
-    await rm(path.join(origin, "src"), { recursive: true, force: true })
-    await cp(path.join(process.cwd(), "src"), path.join(origin, "src"), { recursive: true })
-    await rm(path.join(origin, "runtime"), { recursive: true, force: true })
-    await cp(path.join(process.cwd(), "runtime"), path.join(origin, "runtime"), { recursive: true })
-    await mkdir(path.join(origin, "scripts"), { recursive: true })
-    await Bun.write(path.join(origin, "install.sh"), Bun.file(path.join(process.cwd(), "install.sh")))
+    expect((await command(["git", "clone", "--quiet", path.resolve(process.cwd(), ".."), origin])).exitCode).toBe(0)
+    await rm(path.join(origin, "better-compact", "src"), { recursive: true, force: true })
+    await cp(path.join(compactRoot, "src"), path.join(origin, "better-compact", "src"), { recursive: true })
+    await rm(path.join(origin, "better-compact", "runtime"), { recursive: true, force: true })
+    await cp(path.join(compactRoot, "runtime"), path.join(origin, "better-compact", "runtime"), { recursive: true })
+    await mkdir(path.join(origin, "better-compact", "scripts"), { recursive: true })
+    await Bun.write(path.join(origin, "better-sync", "install.sh"), Bun.file(path.join(process.cwd(), "install.sh")))
     await Bun.write(
-      path.join(origin, "scripts/configure.ts"),
-      Bun.file(path.join(process.cwd(), "scripts/configure.ts")),
+      path.join(origin, "better-compact", "scripts/configure.ts"),
+      Bun.file(path.join(compactRoot, "scripts/configure.ts")),
     )
     await Bun.write(path.join(origin, "INSTALLER-FIXTURE"), "fixture\n")
     expect(
       (
         await command(
-          ["git", "add", "install.sh", "scripts/configure.ts", "src", "runtime", "INSTALLER-FIXTURE"],
+          ["git", "add", "-A"],
           process.env,
           origin,
         )
@@ -1028,7 +1030,7 @@ function isolatedAgentDir() {
 }
 
 function managedSource(install: string) {
-  return path.join(install, "runtime")
+  return path.join(install, "better-compact", "runtime")
 }
 
 async function configure(
@@ -1038,7 +1040,7 @@ async function configure(
   modelExplicit = true,
 ) {
   return command(
-    [process.execPath, path.join(process.cwd(), "scripts/configure.ts")],
+    [process.execPath, path.join(compactRoot, "scripts/configure.ts")],
     configureEnvironment(config, install, model, modelExplicit),
   )
 }
@@ -1052,30 +1054,38 @@ function configureEnvironment(
   return {
     ...process.env,
     OPENCODE_SAFE_COMPACTION_CONFIG_DIR: config,
-    OPENCODE_SAFE_COMPACTION_DIR: install,
+    OPENCODE_SAFE_COMPACTION_DIR: path.join(install, "better-compact"),
     OPENCODE_SAFE_COMPACTION_MODEL: model,
     OPENCODE_SAFE_COMPACTION_MODEL_EXPLICIT: modelExplicit ? "1" : "0",
   }
 }
 
-async function prepareInstall(install: string) {
+async function prepareLegacyInstall(install: string) {
+  // Models a pre-split monolith checkout: src/index.ts sits at the root.
   await mkdir(install, { recursive: true })
-  await cp(path.join(process.cwd(), "src"), path.join(install, "src"), { recursive: true })
-  await cp(path.join(process.cwd(), "runtime"), path.join(install, "runtime"), { recursive: true })
+  await cp(path.join(compactRoot, "src"), path.join(install, "src"), { recursive: true })
+  await cp(path.join(compactRoot, "runtime"), path.join(install, "runtime"), { recursive: true })
+}
+
+async function prepareInstall(install: string) {
+  // Models a managed checkout: the compaction package lives in a subfolder.
+  await mkdir(path.join(install, "better-compact"), { recursive: true })
+  await cp(path.join(compactRoot, "src"), path.join(install, "better-compact", "src"), { recursive: true })
+  await cp(path.join(compactRoot, "runtime"), path.join(install, "better-compact", "runtime"), { recursive: true })
 }
 
 async function installerOrigin(root: string) {
   const origin = path.join(root, `origin-${crypto.randomUUID()}`)
-  expect((await command(["git", "clone", "--quiet", process.cwd(), origin])).exitCode).toBe(0)
-  await rm(path.join(origin, "src"), { recursive: true, force: true })
-  await cp(path.join(process.cwd(), "src"), path.join(origin, "src"), { recursive: true })
-  await rm(path.join(origin, "runtime"), { recursive: true, force: true })
-  await cp(path.join(process.cwd(), "runtime"), path.join(origin, "runtime"), { recursive: true })
-  await mkdir(path.join(origin, "scripts"), { recursive: true })
-  await Bun.write(path.join(origin, "install.sh"), Bun.file(path.join(process.cwd(), "install.sh")))
-  await Bun.write(path.join(origin, "scripts/configure.ts"), Bun.file(path.join(process.cwd(), "scripts/configure.ts")))
+  expect((await command(["git", "clone", "--quiet", path.resolve(process.cwd(), ".."), origin])).exitCode).toBe(0)
+  await rm(path.join(origin, "better-compact", "src"), { recursive: true, force: true })
+  await cp(path.join(compactRoot, "src"), path.join(origin, "better-compact", "src"), { recursive: true })
+  await rm(path.join(origin, "better-compact", "runtime"), { recursive: true, force: true })
+  await cp(path.join(compactRoot, "runtime"), path.join(origin, "better-compact", "runtime"), { recursive: true })
+  await mkdir(path.join(origin, "better-compact", "scripts"), { recursive: true })
+  await Bun.write(path.join(origin, "better-sync", "install.sh"), Bun.file(path.join(process.cwd(), "install.sh")))
+  await Bun.write(path.join(origin, "better-compact", "scripts/configure.ts"), Bun.file(path.join(compactRoot, "scripts/configure.ts")))
   expect(
-    (await command(["git", "add", "install.sh", "scripts/configure.ts", "src", "runtime"], process.env, origin))
+    (await command(["git", "add", "-A"], process.env, origin))
       .exitCode,
   ).toBe(0)
   const changed = await command(["git", "diff", "--cached", "--quiet"], process.env, origin)
