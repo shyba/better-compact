@@ -1,5 +1,19 @@
 # opencode-safe-compaction
 
+> **Repository layout (2026-10):** this repo ships two isolated npm projects,
+> each installable on its own. The repository will be renamed `pi-extensions`.
+>
+> | package | carries | install |
+> |---|---|---|
+> | [`better-compact/`](better-compact/) | the VCC compaction only (pi + OpenCode extensions) | `pi install npm:better-compact` |
+> | [`better-sync/`](better-sync/) | the CLI and services (sync daemon, verify, RAG) | `npm i -g better-sync` |
+>
+> Neither package depends on the other: a sync-only host carries no
+> compaction code and a compaction-only host no CLI. `bun install` at the repo
+> root links both for development (`bun run build` / `bun run test` run each
+> package in turn).
+
+
 ## Install
 
 One command installs whatever the host supports — it probes for OpenCode, Pi and Codex and installs the matching targets:
