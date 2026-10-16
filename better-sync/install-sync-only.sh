@@ -30,7 +30,15 @@ install_dir=${OPENCODE_SAFE_COMPACTION_DIR:-}
 if [ -z "$install_dir" ]; then
   install_dir=${HOME:?HOME must be set}/.local/share/better-compact
   legacy_install_dir=${HOME}/.local/share/opencode/plugins/safe-compaction
-  if [ ! -e "$install_dir" ] && [ -d "$legacy_install_dir/.git" ]; then install_dir=$legacy_install_dir; fi
+  # Relocate, don't adopt: the sync daemon must not live in opencode's plugin
+  # directory — plugin updates replace that tree and strand the unit (new
+  # package on disk, old daemon running from a deleted inode).
+  if [ ! -e "$install_dir" ] && [ -d "$legacy_install_dir/.git" ]; then
+    mkdir -p "$(dirname "$install_dir")"
+    mv "$legacy_install_dir" "$install_dir" 2>/dev/null || say "note: could not relocate the legacy checkout at $legacy_install_dir; installing fresh at $install_dir (the old copy can be removed)"
+  elif [ -e "$install_dir" ] && [ -d "$legacy_install_dir" ]; then
+    say "note: stale legacy checkout at $legacy_install_dir is no longer used and can be removed"
+  fi
 fi
 
 case "$install_dir" in /*) ;; *) fail "install directory must be absolute: $install_dir" ;; esac

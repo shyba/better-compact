@@ -9,10 +9,17 @@ legacy_adopted=0
 if [ -z "$install_dir" ]; then
   install_dir=${HOME:?HOME must be set}/.local/share/better-compact
   legacy_install_dir=${HOME}/.local/share/opencode/plugins/safe-compaction
-  # adopt a pre-rename checkout instead of installing a second copy
+  # A pre-rename checkout is relocated to the canonical path instead of adopted
+  # in place: a persistent service must not live inside opencode's plugin
+  # directory, where plugin updates replace the tree and strand the unit (new
+  # package on disk, old daemon running from a deleted inode).
   if [ ! -e "$install_dir" ] && [ -d "$legacy_install_dir/.git" ]; then
-    install_dir=$legacy_install_dir
-    legacy_adopted=1
+    mkdir -p "$(dirname "$install_dir")"
+    if mv "$legacy_install_dir" "$install_dir" 2>/dev/null; then
+      legacy_adopted=1
+    fi
+  elif [ -e "$install_dir" ] && [ -d "$legacy_install_dir" ]; then
+    printf 'opencode-safe-compaction: note: stale legacy checkout at %s is no longer used and can be removed\n' "$legacy_install_dir"
   fi
 fi
 config_dir=${OPENCODE_SAFE_COMPACTION_CONFIG_DIR:-${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}}
@@ -286,7 +293,7 @@ reject_insecure_repository "$repository"
 git_bin=$(resolve_command git)
 
 if [ "$legacy_adopted" -eq 1 ]; then
-  say "adopted the existing checkout at $install_dir (pre-rename path; set OPENCODE_SAFE_COMPACTION_DIR to relocate)"
+  say "migrated the legacy checkout to $install_dir (relocated out of opencode's plugin directory; units and wrappers below point here)"
 fi
 
 # Runtime probing: OpenCode, Pi and Codex are all valid install targets.

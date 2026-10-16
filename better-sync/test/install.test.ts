@@ -445,6 +445,32 @@ describe("installer", () => {
     expect(await Array.fromAsync(new Bun.Glob("opencode-safe-compaction.*").scan(temporaryDirectory))).toEqual([])
   })
 
+  test("relocates a legacy checkout out of opencode's plugin directory instead of adopting it in place", async () => {
+    const root = await directory()
+    const origin = await installerOrigin(root)
+    const fakeOpenCode = await openCodeFixture(root, "opencode-legacy-relocation")
+    const legacy = path.join(root, ".local/share/opencode/plugins/safe-compaction")
+    await mkdir(path.dirname(legacy), { recursive: true })
+    expect((await command(["git", "clone", "--quiet", origin, legacy])).exitCode).toBe(0)
+
+    const result = await command(["sh", "install.sh"], {
+      ...process.env,
+      HOME: root,
+      OPENCODE_SAFE_COMPACTION_REPO: origin,
+      OPENCODE_SAFE_COMPACTION_CONFIG_DIR: path.join(root, "config"),
+      OPENCODE_SAFE_COMPACTION_BUN: process.execPath,
+      OPENCODE_SAFE_COMPACTION_OPENCODE: fakeOpenCode,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("migrated the legacy checkout to")
+    const canonical = path.join(root, ".local/share/better-compact")
+    expect((await stat(path.join(canonical, ".git"))).isDirectory()).toBe(true)
+    expect(await Bun.file(legacy).exists()).toBe(false)
+    // the relocated checkout is updated to the current layout, not left stale
+    expect(await Bun.file(path.join(canonical, "better-compact", "scripts", "configure.ts")).exists()).toBe(true)
+  })
+
   test("keeps an explicit missing OpenCode override authoritative", async () => {
     const root = await directory()
     const fallback = path.join(root, ".opencode/bin")
