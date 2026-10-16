@@ -671,7 +671,14 @@ fi
 [ -d "$HOME/.codex" ] && say "codex detected: its sessions are covered by the sync daemon (codex-jsonl source); nothing else to install"
 
 # --- sync daemon (runtime-independent) ---
-if [ -n "${OPENCODE_SAFE_COMPACTION_SYNC_URL:-}" ] || [ -n "${OPENCODE_SAFE_COMPACTION_SYNC_SETUP_ARGS:-}" ]; then
+sync_unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/better-compact-sync.service
+if [ -e "$sync_unit" ]; then
+  # A pre-existing unit names the old ExecStart; rewrite and restart it so a
+  # relocated checkout is picked up without manual steps.
+  say "rewriting the existing sync unit for the updated checkout"
+  OPENCODE_SAFE_COMPACTION_DIR="$install_dir" "$bun_bin" "$install_dir/better-sync/scripts/cli.ts" sync install \
+    || say "sync unit rewrite failed; run: bun scripts/cli.ts sync install"
+elif [ -n "${OPENCODE_SAFE_COMPACTION_SYNC_URL:-}" ] || [ -n "${OPENCODE_SAFE_COMPACTION_SYNC_SETUP_ARGS:-}" ]; then
   say "installing the sync daemon"
   # shellcheck disable=SC2086
   "$bun_bin" scripts/cli.ts sync setup ${OPENCODE_SAFE_COMPACTION_SYNC_SETUP_ARGS:-} || say "sync setup failed; run: bun scripts/cli.ts sync setup"

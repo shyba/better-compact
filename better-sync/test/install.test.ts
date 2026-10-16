@@ -508,6 +508,39 @@ describe("installer", () => {
     expect((await stat(path.join(checkout, ".git"))).isDirectory()).toBe(true)
   }, 120_000)
 
+  test("update moves the code first and the second run applies the repairs", async () => {
+    const root = await directory()
+    const origin = await installerOrigin(root)
+    const fakeOpenCode = await openCodeFixture(root, "opencode-twice")
+    const checkout = path.join(root, ".local/share/better-compact")
+    await mkdir(path.dirname(checkout), { recursive: true })
+    await command(["git", "clone", "--quiet", origin, checkout])
+    // advance the origin after the clone so the first update has work to do
+    await Bun.write(path.join(origin, "ADVANCE-NOTE"), "newer than the clone\n")
+    await command(["git", "-C", origin, "add", "-A"])
+    await command(["git", "-C", origin, "-c", "user.name=T", "-c", "user.email=t@e.invalid", "commit", "-q", "-m", "advance"])
+
+    const env = {
+      ...process.env,
+      HOME: root,
+      OPENCODE_SAFE_COMPACTION_REPO: origin,
+      OPENCODE_SAFE_COMPACTION_DIR: checkout,
+      OPENCODE_SAFE_COMPACTION_CONFIG_DIR: path.join(root, "config"),
+      OPENCODE_SAFE_COMPACTION_BUN: process.execPath,
+      OPENCODE_SAFE_COMPACTION_OPENCODE: fakeOpenCode,
+    }
+    const runUpdate = () => command([process.execPath, path.join(process.cwd(), "scripts/cli.ts"), "update"], env)
+
+    const first = await runUpdate()
+    expect(first.exitCode).toBe(0)
+    expect(first.stdout).toContain("once more to apply the new repair logic")
+    expect(first.stdout).not.toContain("installed successfully")
+
+    const second = await runUpdate()
+    expect(second.exitCode).toBe(0)
+    expect(second.stdout).toContain("installed successfully")
+  }, 180_000)
+
   test("restarts from the checkout's own installer when the served copy is stale", async () => {
     const root = await directory()
     const origin = await installerOrigin(root)

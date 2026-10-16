@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { access, chmod, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { existsSync, readFileSync } from "node:fs"
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import path from "node:path"
 import { configPaths, loadConfig, saveConfig } from "../src/config.js"
@@ -146,11 +146,37 @@ function machineWorkerToken(statePath: string) {
   catch { return randomUUID() }
 }
 
+function gitOut(args: string[]): string | undefined {
+  try {
+    return execFileSync("git", ["-C", installDir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+  } catch {
+    return undefined
+  }
+}
+
 async function update() {
   const mode = await installationMode()
   if (mode !== "git") {
     console.error(`${mode} execution is not self-updating; use the package manager to upgrade, then run better-sync install from a stable package location`)
     return 2
+  }
+  // Fast-forward the checkout before running the installer: an update from an
+  // old release must run the NEW repairs (relocation, pi registration repair,
+  // unit rewrite), and the only way to get them is to move the code first.
+  // When the fetch moves the head, this run was performed by the old binary
+  // by definition -- stop after moving the code and let the next run apply
+  // the repairs instead of half-applying with old logic.
+  const headBefore = gitOut(["rev-parse", "HEAD"])?.trim()
+  gitOut(["fetch", "--quiet", "origin"])
+  if (gitOut(["merge", "--quiet", "--ff-only", "@{upstream}"]) === undefined) {
+    if (gitOut(["checkout", "--quiet", "--detach", "origin/HEAD"]) === undefined) {
+      gitOut(["checkout", "--quiet", "--detach", "origin/default"])
+    }
+  }
+  const headAfter = gitOut(["rev-parse", "HEAD"])?.trim()
+  if (headBefore !== undefined && headAfter !== undefined && headBefore !== headAfter) {
+    console.log(`updated better-compact to ${headAfter.slice(0, 12)}; run 'better-compact update' once more to apply the new repair logic`)
+    return 0
   }
   // install.sh ships with this (better-sync) package and orchestrates both.
   const syncRoot = path.resolve(path.dirname(process.argv[1] ?? "."), "..")
