@@ -47,13 +47,19 @@ describe("better-compact Pi installation", () => {
     await mkdir(agent, { recursive: true })
     // a dead relative entry, a legacy-checkout entry that still exists, and a
     // live entry that must survive the repair untouched
+    // an existing directory without a package manifest is unloadable for pi
+    await mkdir(path.join(root, "empty-dir"), { recursive: true })
+    await mkdir(path.join(root, "safe-compaction/src"), { recursive: true })
+    await Bun.write(path.join(root, "safe-compaction/src/pi.ts"), "export {}\n")
     await Bun.write(path.join(agent, "settings.json"), JSON.stringify({
       other: { keep: true },
       packages: [
         "../gone-checkout/better-compact",
         "../../.local/share/opencode/plugins/safe-compaction/better-compact",
+        "../../empty-dir",
         "../../safe-compaction/better-compact",
       ],
+      extensions: ["../gone-ext.ts", "../../safe-compaction/src/pi.ts"],
     }))
     const legacy = path.join(root, ".local/share/opencode/plugins/safe-compaction/better-compact")
     await mkdir(legacy, { recursive: true })
@@ -69,9 +75,11 @@ describe("better-compact Pi installation", () => {
 
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain("repaired Pi packages: removed stale entry ../gone-checkout/better-compact")
+    expect(result.stdout).toContain("repaired Pi extensions: removed stale entry ../gone-ext.ts")
     const settings = JSON.parse(await readFile(path.join(agent, "settings.json"), "utf8"))
     expect(settings.other).toEqual({ keep: true })
     expect(settings.packages).toEqual(["../../safe-compaction/better-compact"])
+    expect(settings.extensions).toEqual(["../../safe-compaction/src/pi.ts"])
   })
 
   test("requires an explicit package source from npx", async () => {

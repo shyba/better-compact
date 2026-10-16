@@ -453,6 +453,15 @@ describe("installer", () => {
     await mkdir(path.dirname(legacy), { recursive: true })
     expect((await command(["git", "clone", "--quiet", origin, legacy])).exitCode).toBe(0)
 
+    // a stale pi registration that the installer's pi leg must repair
+    const agent = path.join(root, ".pi/agent")
+    await mkdir(agent, { recursive: true })
+    await Bun.write(path.join(agent, "settings.json"), JSON.stringify({ packages: ["../gone/better-compact"] }))
+    const piLog = path.join(root, "pi.log")
+    const fakePi = path.join(root, "pi")
+    await Bun.write(fakePi, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PI_LOG"\n[ "$1" = "--version" ] && exit 0\nexit 0\n')
+    await chmod(fakePi, 0o755)
+
     const result = await command(["sh", "install.sh"], {
       ...process.env,
       HOME: root,
@@ -460,16 +469,71 @@ describe("installer", () => {
       OPENCODE_SAFE_COMPACTION_CONFIG_DIR: path.join(root, "config"),
       OPENCODE_SAFE_COMPACTION_BUN: process.execPath,
       OPENCODE_SAFE_COMPACTION_OPENCODE: fakeOpenCode,
+      OPENCODE_SAFE_COMPACTION_PI: fakePi,
+      PI_LOG: piLog,
     })
 
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain("migrated the legacy checkout to")
+    expect(result.stdout).toContain("repaired Pi packages: removed stale entry ../gone/better-compact")
+    expect(result.stdout).toContain("installed as a pi package")
+    expect(JSON.parse(await Bun.file(path.join(agent, "settings.json")).text()).packages).toEqual([])
     const canonical = path.join(root, ".local/share/better-compact")
     expect((await stat(path.join(canonical, ".git"))).isDirectory()).toBe(true)
     expect(await Bun.file(legacy).exists()).toBe(false)
     // the relocated checkout is updated to the current layout, not left stale
     expect(await Bun.file(path.join(canonical, "better-compact", "scripts", "configure.ts")).exists()).toBe(true)
-  })
+  }, 120_000)
+
+  test("better-compact update re-runs the installer for the managed checkout", async () => {
+    const root = await directory()
+    const origin = await installerOrigin(root)
+    const fakeOpenCode = await openCodeFixture(root, "opencode-update")
+    const checkout = path.join(root, ".local/share/better-compact")
+    await mkdir(path.dirname(checkout), { recursive: true })
+    expect((await command(["git", "clone", "--quiet", origin, checkout])).exitCode).toBe(0)
+
+    const result = await command([process.execPath, path.join(process.cwd(), "scripts/cli.ts"), "update"], {
+      ...process.env,
+      HOME: root,
+      OPENCODE_SAFE_COMPACTION_REPO: origin,
+      OPENCODE_SAFE_COMPACTION_DIR: checkout,
+      OPENCODE_SAFE_COMPACTION_CONFIG_DIR: path.join(root, "config"),
+      OPENCODE_SAFE_COMPACTION_BUN: process.execPath,
+      OPENCODE_SAFE_COMPACTION_OPENCODE: fakeOpenCode,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("installed successfully")
+    expect((await stat(path.join(checkout, ".git"))).isDirectory()).toBe(true)
+  }, 120_000)
+
+  test("restarts from the checkout's own installer when the served copy is stale", async () => {
+    const root = await directory()
+    const origin = await installerOrigin(root)
+    const fakeOpenCode = await openCodeFixture(root, "opencode-reexec")
+    const checkout = path.join(root, ".local/share/better-compact")
+    await mkdir(path.dirname(checkout), { recursive: true })
+    expect((await command(["git", "clone", "--quiet", origin, checkout])).exitCode).toBe(0)
+    // serve a stale copy: same installer with a marker, diverged from the
+    // checkout's own file so the cmp guard must fire
+    const served = path.join(root, "served-install.sh")
+    await Bun.write(served, `${await Bun.file(path.join(process.cwd(), "install.sh")).text()}\n# stale served copy\n`)
+
+    const result = await command(["sh", served], {
+      ...process.env,
+      HOME: root,
+      OPENCODE_SAFE_COMPACTION_REPO: origin,
+      OPENCODE_SAFE_COMPACTION_DIR: checkout,
+      OPENCODE_SAFE_COMPACTION_CONFIG_DIR: path.join(root, "config"),
+      OPENCODE_SAFE_COMPACTION_BUN: process.execPath,
+      OPENCODE_SAFE_COMPACTION_OPENCODE: fakeOpenCode,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("installer updated; restarting from the checkout's own copy")
+    expect(result.stdout).toContain("installed successfully")
+  }, 120_000)
 
   test("keeps an explicit missing OpenCode override authoritative", async () => {
     const root = await directory()

@@ -445,6 +445,24 @@ if [ -e "$install_dir" ]; then
     "$git_bin" -C "$install_dir" fetch origin "$ref"
     "$git_bin" -C "$install_dir" merge --ff-only FETCH_HEAD
   fi
+  # The fetched installer may be newer than the copy curl served (raw caches
+  # lag the repository). Restart from the checkout's own installer when the
+  # running copy differs from it, so an update always runs its own latest
+  # logic; the guard prevents a loop.
+  if [ "${OPENCODE_SAFE_COMPACTION_REEXEC:-0}" != 1 ] \
+      && [ -f "$install_dir/better-sync/install.sh" ] \
+      && command -v cmp >/dev/null 2>&1 \
+      && [ "$checkout_changed" -eq 1 ] && [ "$cloned_checkout" -eq 0 ] \
+      && ! cmp -s "$0" "$install_dir/better-sync/install.sh"; then
+    say "installer updated; restarting from the checkout's own copy"
+    # exec keeps the pid, so the mkdir/pid locks would read as held by the
+    # restarted installer itself; release them like finish() would.
+    [ -n "$config_lock" ] && rm -rf -- "$config_lock"
+    [ -n "$checkout_lock" ] && rm -rf -- "$checkout_lock"
+    config_lock=
+    checkout_lock=
+    exec env OPENCODE_SAFE_COMPACTION_REEXEC=1 sh "$install_dir/better-sync/install.sh" "$@"
+  fi
 else
   say "cloning $repository into $install_dir"
   mkdir -p "$(dirname "$install_dir")"
@@ -601,7 +619,11 @@ fi
 pi_ext_dir=$HOME/.pi/agent/extensions
 legacy_pi_shim=$pi_ext_dir/safe-compaction.ts
 if [ -n "$pi_bin" ] && [ -x "$pi_bin" ]; then
-  if "$pi_bin" install "$install_dir/better-compact"; then
+  # Delegate to the CLI: it repairs stale/legacy package and extension
+  # registrations first (pi refuses to start over a path that no longer
+  # resolves), registers the current checkout, and removes duplicate shims.
+  if OPENCODE_SAFE_COMPACTION_PI="$pi_bin" OPENCODE_SAFE_COMPACTION_DIR="$install_dir" \
+      "$bun_bin" "$install_dir/better-sync/scripts/cli.ts" install pi; then
     say "installed as a pi package (entry points: src/pi.ts, src/cat.ts)"
     # Two extension sources registering the same tool name make Pi refuse the
     # session, so drop the shims this installer generated earlier. Foreign

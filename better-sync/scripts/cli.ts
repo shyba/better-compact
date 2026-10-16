@@ -156,6 +156,15 @@ async function update() {
   const syncRoot = path.resolve(path.dirname(process.argv[1] ?? "."), "..")
   await access(path.join(syncRoot, "install.sh"))
   const result = await run("sh", [path.join(syncRoot, "install.sh")], process.env)
+  if (result !== 0) return result
+  // The installer may have relocated the checkout; a pre-existing unit still
+  // names the old path in ExecStart, which leaves a daemon running deleted
+  // code after its next restart. Rewrite and restart it when present.
+  const serviceDirectory = path.join(process.env.XDG_CONFIG_HOME ?? path.join(process.env.HOME ?? ".", ".config"), "systemd", "user")
+  if (process.platform === "linux" && (await exists(path.join(serviceDirectory, "better-compact-sync.service")))) {
+    console.log("rewriting better-compact-sync.service for the updated checkout")
+    return syncInstall(process.env.OPENCODE_SAFE_COMPACTION_SYNC_URL)
+  }
   return result
 }
 
@@ -246,7 +255,13 @@ async function removeGeneratedPiShims() {
  *  to live inside opencode's plugin directory). Drop stale and legacy-path
  *  entries before registering the current checkout so one update cannot brick
  *  the next pi session; pi install below re-adds the live one. */
-async function repairPiPackages() {
+/** Pi refuses to start while a registered package/extension path no longer
+ *  resolves (a relocated or removed checkout -- e.g. the pre-rename checkout
+ *  that used to live inside opencode's plugin directory, or its old root-dir
+ *  registration from before the monorepo rename). Drop stale and legacy-path
+ *  entries before registering the current checkout so one update cannot brick
+ *  the next pi session; pi install below re-adds the live one. */
+async function repairPiRegistrations() {
   const settingsPath = path.join(piAgentDirectory, "settings.json")
   let settings: Record<string, unknown>
   try {
@@ -254,36 +269,52 @@ async function repairPiPackages() {
   } catch {
     return // no settings file or unreadable JSON: nothing of ours to repair
   }
-  if (!Array.isArray(settings.packages)) return
   const legacyDirectory = path.resolve(process.env.HOME ?? ".", ".local/share/opencode/plugins/safe-compaction")
-  const kept: unknown[] = []
-  const removed: string[] = []
-  for (const entry of settings.packages) {
-    if (typeof entry !== "string") {
-      kept.push(entry)
-      continue
-    }
-    if (entry.startsWith("git:") || entry.startsWith("npm:") || entry.startsWith("http")) {
-      kept.push(entry)
-      continue
-    }
-    let resolved = entry
+  let changed = false
+  // A registered directory is loadable only with a package manifest; the
+  // monorepo rename left old root-dir registrations pointing at a directory
+  // pi can no longer resolve as a module.
+  const staleTarget = async (resolved: string) => {
+    if (!(await exists(resolved))) return true
+    if (resolved === legacyDirectory || resolved.startsWith(`${legacyDirectory}${path.sep}`)) return true
     try {
-      resolved = path.resolve(piAgentDirectory, entry)
+      return (await stat(resolved)).isDirectory() && !(await exists(path.join(resolved, "package.json")))
     } catch {
-      kept.push(entry)
-      continue
+      return true
     }
-    const stale = !(await exists(resolved))
-      || resolved === legacyDirectory
-      || resolved.startsWith(`${legacyDirectory}${path.sep}`)
-    if (stale) removed.push(entry)
-    else kept.push(entry)
   }
-  if (!removed.length) return
+  for (const key of ["packages", "extensions"] as const) {
+    const entries = settings[key]
+    if (!Array.isArray(entries)) continue
+    const kept: unknown[] = []
+    const removed: string[] = []
+    for (const entry of entries) {
+      if (typeof entry !== "string") {
+        kept.push(entry)
+        continue
+      }
+      if (entry.startsWith("git:") || entry.startsWith("npm:") || entry.startsWith("http")) {
+        kept.push(entry)
+        continue
+      }
+      let resolved = entry
+      try {
+        resolved = path.resolve(piAgentDirectory, entry)
+      } catch {
+        kept.push(entry)
+        continue
+      }
+      if (await staleTarget(resolved)) removed.push(entry)
+      else kept.push(entry)
+    }
+    if (!removed.length) continue
+    settings[key] = kept
+    changed = true
+    for (const entry of removed) console.log(`repaired Pi ${key}: removed stale entry ${entry}`)
+  }
+  if (!changed) return
   try {
-    await writeFile(settingsPath, `${JSON.stringify({ ...settings, packages: kept }, null, 2)}\n`, { mode: 0o600 })
-    for (const entry of removed) console.log(`repaired Pi packages: removed stale entry ${entry}`)
+    await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 })
   } catch (error) {
     console.error(`warning: could not repair ${settingsPath}: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -300,7 +331,7 @@ async function installPi() {
   const mode = await installationMode()
   const source = piSource(mode)
   if (!source) return 2
-  await repairPiPackages()
+  await repairPiRegistrations()
   console.log(`Installing better-compact Pi extensions from ${source}`)
   const status = await run(pi, ["install", source], process.env)
   if (status === 0) await removeGeneratedPiShims()
