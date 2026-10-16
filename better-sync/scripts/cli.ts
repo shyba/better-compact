@@ -241,6 +241,54 @@ async function removeGeneratedPiShims() {
   }
 }
 
+/** Pi refuses to start while a registered package path no longer resolves
+ *  (a relocated or removed checkout -- e.g. the pre-rename checkout that used
+ *  to live inside opencode's plugin directory). Drop stale and legacy-path
+ *  entries before registering the current checkout so one update cannot brick
+ *  the next pi session; pi install below re-adds the live one. */
+async function repairPiPackages() {
+  const settingsPath = path.join(piAgentDirectory, "settings.json")
+  let settings: Record<string, unknown>
+  try {
+    settings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>
+  } catch {
+    return // no settings file or unreadable JSON: nothing of ours to repair
+  }
+  if (!Array.isArray(settings.packages)) return
+  const legacyDirectory = path.resolve(process.env.HOME ?? ".", ".local/share/opencode/plugins/safe-compaction")
+  const kept: unknown[] = []
+  const removed: string[] = []
+  for (const entry of settings.packages) {
+    if (typeof entry !== "string") {
+      kept.push(entry)
+      continue
+    }
+    if (entry.startsWith("git:") || entry.startsWith("npm:") || entry.startsWith("http")) {
+      kept.push(entry)
+      continue
+    }
+    let resolved = entry
+    try {
+      resolved = path.resolve(piAgentDirectory, entry)
+    } catch {
+      kept.push(entry)
+      continue
+    }
+    const stale = !(await exists(resolved))
+      || resolved === legacyDirectory
+      || resolved.startsWith(`${legacyDirectory}${path.sep}`)
+    if (stale) removed.push(entry)
+    else kept.push(entry)
+  }
+  if (!removed.length) return
+  try {
+    await writeFile(settingsPath, `${JSON.stringify({ ...settings, packages: kept }, null, 2)}\n`, { mode: 0o600 })
+    for (const entry of removed) console.log(`repaired Pi packages: removed stale entry ${entry}`)
+  } catch (error) {
+    console.error(`warning: could not repair ${settingsPath}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 async function installPi() {
   const pi = process.env.OPENCODE_SAFE_COMPACTION_PI ?? "pi"
   if (!(await commandWorks(pi, ["--version"]))) {
@@ -252,6 +300,7 @@ async function installPi() {
   const mode = await installationMode()
   const source = piSource(mode)
   if (!source) return 2
+  await repairPiPackages()
   console.log(`Installing better-compact Pi extensions from ${source}`)
   const status = await run(pi, ["install", source], process.env)
   if (status === 0) await removeGeneratedPiShims()

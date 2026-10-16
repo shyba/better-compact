@@ -36,6 +36,44 @@ describe("better-compact Pi installation", () => {
     expect(await readFile(log, "utf8")).toBe(`--version\ninstall ${install}/better-compact\n`)
   })
 
+  test("repairs stale Pi package entries before registering the current checkout", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
+    temporary.push(root)
+    const install = path.join(root, "safe-compaction")
+    await mkdir(path.join(install, ".git"), { recursive: true })
+    await mkdir(path.join(install, "better-compact"), { recursive: true })
+    await Bun.write(path.join(install, "better-compact", "package.json"), "{}")
+    const agent = path.join(root, ".pi/agent")
+    await mkdir(agent, { recursive: true })
+    // a dead relative entry, a legacy-checkout entry that still exists, and a
+    // live entry that must survive the repair untouched
+    await Bun.write(path.join(agent, "settings.json"), JSON.stringify({
+      other: { keep: true },
+      packages: [
+        "../gone-checkout/better-compact",
+        "../../.local/share/opencode/plugins/safe-compaction/better-compact",
+        "../../safe-compaction/better-compact",
+      ],
+    }))
+    const legacy = path.join(root, ".local/share/opencode/plugins/safe-compaction/better-compact")
+    await mkdir(legacy, { recursive: true })
+    const log = path.join(root, "pi.log")
+    const pi = await fakePi(root)
+
+    const result = await runCLI(["install", "pi"], {
+      HOME: root,
+      OPENCODE_SAFE_COMPACTION_DIR: install,
+      OPENCODE_SAFE_COMPACTION_PI: pi,
+      PI_LOG: log,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("repaired Pi packages: removed stale entry ../gone-checkout/better-compact")
+    const settings = JSON.parse(await readFile(path.join(agent, "settings.json"), "utf8"))
+    expect(settings.other).toEqual({ keep: true })
+    expect(settings.packages).toEqual(["../../safe-compaction/better-compact"])
+  })
+
   test("requires an explicit package source from npx", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-cli-"))
     temporary.push(root)
