@@ -134,6 +134,24 @@ The checkboxes describe work to be completed, not work already done.
   receiver ran; crash release and foreign-lock preservation passed tests. This
   does not coordinate different users or hosts and is not a distributed
   single-writer guarantee.
+- 2026-11-20: THE UPDATE CHANNEL IS THE FLEET DELIVERY MECHANISM — shipped.
+  `better-compact update` on fleet hosts is a git self-update from the mirror
+  (192.168.0.71:222, branch `default`); the entire ClickHouse work is now
+  committed and pushed there (5ad08a4). The updated code carries an automatic,
+  idempotent legacy→ClickHouse migration in `sync run`: an existing s3-store
+  config migrates fail-closed when a ClickHouse receiver advertises on the
+  same host at BETTER_SYNC_CLICKHOUSE_PORT (default 4176, this host's
+  LAN-exposed receiver); on 404/outage/mismatch it retains the legacy store
+  and retries next pass; env+config rewritten with a `.pre-clickhouse`
+  rollback backup; BETTER_SYNC_NO_AUTO_MIGRATE=1 disables per host.
+  Covered by two new end-to-end CLI tests (migration + fail-closed),
+  cli.test.ts 28/28, runtime 28/28. Fleet rollout procedure: each host runs
+  `better-compact update` twice (two-run protocol), then its daemon migrates
+  and sends to ClickHouse; after `sync verify` shows raw coverage, its legacy
+  feeder is retired and the source is wired into the projector + watch (one
+  line each). Remaining operator items unchanged: physical access per host,
+  the 451 MiB file bound, retention deletion decision, 598 upgrade optional
+  (same-rack insurance posture).
 - 2026-11-19: FLEET ROLLOUT SERVER SIDE COMPLETE. Discovery: this host IS
   192.168.0.31 (the MinIO host — same-machine backups); LAN neighbors include
   192.168.0.107 (SSH open, session-history evidence `--home-user-107-writer--`),
