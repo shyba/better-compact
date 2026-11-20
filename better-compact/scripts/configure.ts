@@ -284,6 +284,16 @@ async function verifyExistingPluginIdentity(source: string, file: string, kind: 
         : undefined
     if (!sourceUrl || sourceUrl.protocol !== "file:") throw new TypeError("source is not an absolute local path")
     const sourcePath = fileURLToPath(sourceUrl)
+    // A stale entry may point at a location that no longer exists (relocated
+    // checkout, moved plugin directory). A missing target cannot be serving
+    // anything, so it is safe to replace: return without verification instead
+    // of aborting the whole install.
+    try {
+      await stat(sourcePath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return
+      throw error
+    }
     const url = pathToFileURL((await stat(sourcePath)).isDirectory() ? path.join(sourcePath, `${kind}.js`) : sourcePath)
     url.searchParams.set("installer-migration", `${Date.now()}-${process.pid}`)
     const module: unknown = await import(url.href)
