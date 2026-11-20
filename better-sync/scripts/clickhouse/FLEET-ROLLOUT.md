@@ -23,6 +23,24 @@ Known producer hosts (LAN neighbors, SSH open, no shared credentials yet):
 `.106`, `.109`, `.92`, `.81`. `workstation` is a logical name from the PG
 inventory (drained Oct 2 — its data is already in ClickHouse).
 
+## One-time recovery for hosts on the pre-restructure layout
+
+Hosts whose checkout predates the two-package restructure (tree had `src/`
+and `scripts/` at the repo root, e.g. commit `727c414c`) crash during
+`better-compact update`: the fast-forward moves the code into `better-sync/`
+and `better-compact/`, the old installer then cannot find
+`scripts/configure.ts`, and the checkout rolls back. Recovery (once per
+host, from the host itself):
+
+    cd ~/.local/share/opencode/plugins/safe-compaction   # or the rolled-back checkout path
+    git fetch origin && git checkout origin/default
+    ./better-sync/install.sh
+
+After this the new layout-aware installer owns the host; subsequent
+`better-compact update` runs normally, the daemon auto-migrates to the
+ClickHouse store per the migration semantics in
+`CLICKHOUSE-CUTOVER-PLAN.md`, and `sync verify` shows coverage.
+
 ## What the operator must provide
 - SSH access from this host to each producer host (add the pubkey in
   `~/.ssh/id_ed25519.pub` to each host's `authorized_keys`, or run the script
