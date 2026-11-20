@@ -6,7 +6,8 @@ import path from 'node:path'
 import { SyncState } from '../src/sync-state.js'
 import { verifySync } from '../scripts/sync-verify.js'
 
-type Scenario = { receipt?: boolean; changed?: boolean; missingState?: boolean; status?: number; archive?: string; loaded?: string; indexed?: string; malformed?: boolean; duplicate?: boolean; additionalMissing?: boolean }
+type Scenario = { receipt?: boolean; changed?: boolean; missingState?: boolean; status?: number; archive?: string; loaded?: string; indexed?: string; malformed?: boolean; duplicate?: boolean; additionalMissing?: boolean; clickhouse?: boolean; backup?: string; wrongAuthority?: boolean }
+const authority = { store: 'clickhouse' as const, protocol: 1 as const, authority_id: 'test-authority-000001', max_segment_bytes: 1024 }
 async function check(scenario: Scenario = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'better-compact-verify-'))
   const logs: string[] = []
@@ -39,11 +40,11 @@ async function check(scenario: Scenario = {}) {
       const body = await request.json()
       requests.push({ method: request.method, pathname: new URL(request.url).pathname, auth: request.headers.get('authorization'), body })
       if (scenario.status) return new Response('unsupported', { status: scenario.status })
-      return Response.json(scenario.malformed ? { files: [] } : { files: [{ file_id: body.files[0].file_id, archive: { status: scenario.archive ?? 'verified' }, loaded: { status: scenario.loaded ?? 'verified' }, indexed: { status: scenario.indexed ?? 'verified' } }] })
+      return Response.json(scenario.malformed ? { files: [] } : { ...(scenario.clickhouse ? { store: 'clickhouse', authority_id: scenario.wrongAuthority ? 'wrong-authority-00001' : authority.authority_id } : {}), files: [{ file_id: body.files[0].file_id, archive: { status: scenario.archive ?? 'verified' }, ...(scenario.clickhouse ? { backup: { status: scenario.backup ?? 'unknown' } } : {}), loaded: { status: scenario.loaded ?? 'verified' }, indexed: { status: scenario.indexed ?? 'verified' } }] })
     } })
     const sources = [{ kind: 'codex-jsonl', database: sessions }]
     if (scenario.duplicate) sources.push({ kind: 'codex-jsonl-sessions', database: sessions })
-    const code = await verifySync({ sources, state: statePath, endpoint: `http://127.0.0.1:${server.port}`, token: 'fixture-token', json: true })
+    const code = await verifySync({ sources, state: statePath, endpoint: `http://127.0.0.1:${server.port}`, token: 'fixture-token', json: true, ...(scenario.clickhouse ? { authority } : {}) })
     expect(await readFile(statePath).catch(() => undefined)).toEqual(stateBefore)
     expect(await readFile(filename)).toEqual(sourceBefore)
     return { code, report: JSON.parse(logs.at(-1)!), requests, sha256, sourceID, size: meta.size }
@@ -103,6 +104,19 @@ test('duplicate configured JSONL root verifies once using first source kind', as
   expect(result.code).toBe(0)
   expect(result.report.checked).toBe(1)
   expect(result.requests).toHaveLength(1)
+})
+
+test('ClickHouse raw verification does not imply backup coverage', async () => {
+  const result = await check({ clickhouse: true })
+  expect(result.code).toBe(1)
+  expect(result.report.store).toBe('clickhouse')
+  expect(result.report.files[0].archive.status).toBe('verified')
+  expect(result.report.files[0].backup.status).toBe('unknown')
+})
+test('ClickHouse verification refuses a different authority', async () => {
+  const result = await check({ clickhouse: true, wrongAuthority: true, backup: 'verified' })
+  expect(result.code).toBe(1)
+  expect(result.report.files[0].archive.reason).toContain('authority mismatch')
 })
 
 test('checks every discovered file even after one has a complete receipt', async () => {

@@ -1,0 +1,20 @@
+[Unit]
+Description=better-sync native ClickHouse S3 backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/pg-hot/data/better-sync/runtime/clickhouse
+# Protected file containing CH credentials, trusted CA settings and S3 repo URL.
+EnvironmentFile=%h/.config/better-sync/clickhouse.env
+Environment=PYTHONPATH=/pg-hot/data/better-sync/runtime/driver
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /pg-hot/data/better-sync/runtime/clickhouse/backup.py --state-dir /pg-hot/data/better-sync/backup-state
+# A failed first backup leaves the timer paused; successful completion rearms it.
+ExecStartPost=/usr/bin/systemctl --user start better-sync-backup.timer
+# Native job is ASYNC. A known active ID is recovered before any next submission.
+TimeoutStartSec=infinity
+MemoryMax=256M
+NoNewPrivileges=true
+UMask=0077

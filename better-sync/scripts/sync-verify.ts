@@ -3,15 +3,17 @@ import { createHash } from "node:crypto"
 import { stat } from "node:fs/promises"
 import path from "node:path"
 import { discoverS3JsonlSnapshot, hashS3FileSnapshot } from "../src/s3-sync.js"
+import type { Authority } from "../src/clickhouse-sync.js"
 
 type Source = { kind: string; database: string }
 type Stage = { status: string; reason?: string; [key: string]: unknown }
-type Result = { path: string; source: string; local: Stage; archive: Stage; loaded: Stage; indexed: Stage }
+type Result = { path: string; source: string; local: Stage; archive: Stage; backup?: Stage; loaded: Stage; indexed: Stage }
+const stages = (row: Result) => ({ local: row.local, archive: row.archive, ...(row.backup ? { backup: row.backup } : {}), loaded: row.loaded, indexed: row.indexed })
 const unknown = (reason: string): Stage => ({ status: "unknown", reason })
 
 /** Read-only inventory: no receipt reset, upload, schema migration or state writes. */
 export async function verifySync(input: {
-  sources: Source[]; state: string; endpoint: string; token: string; json: boolean
+  sources: Source[]; state: string; endpoint: string; token: string; json: boolean; authority?: Authority
 }): Promise<number> {
   let db: Database | undefined
   const results: Result[] = []
@@ -29,7 +31,7 @@ export async function verifySync(input: {
       if (seen.has(root)) continue
       seen.add(root)
       const sourceID = createHash("sha256").update(`${source.kind}\n${root}`).digest("hex").slice(0, 32)
-      const base = (file: string): Result => ({ path: file, source: root, local: unknown("not scanned"), archive: unknown("not checked"), loaded: unknown("not checked"), indexed: unknown("not checked") })
+      const base = (file: string): Result => ({ path: file, source: root, local: unknown("not scanned"), archive: unknown("not checked"), ...(input.authority ? { backup: unknown("not checked") } : {}), loaded: unknown("not checked"), indexed: unknown("not checked") })
       if (!["codex-jsonl", "codex-jsonl-sessions", "pi-jsonl"].includes(source.kind)) {
         results.push({ ...base(root), local: unknown(`unsupported S3 source: ${source.kind}`) }); continue
       }
@@ -56,26 +58,28 @@ export async function verifySync(input: {
               signal: AbortSignal.timeout(210_000),
             })
             if (!response.ok) throw new Error(`receiver verification HTTP ${response.status}${response.status === 404 ? "; update the receiver to enable /verify" : ""}`)
-            const body = await response.json() as { files?: Array<{ file_id: string; archive: Stage; loaded: Stage; indexed: Stage }> }
+            const body = await response.json() as { store?: string; authority_id?: string; files?: Array<{ file_id: string; archive: Stage; backup?: Stage; loaded: Stage; indexed: Stage }> }
             const remote = body.files?.find(item => item.file_id === receipt.file_id)
-            if (!remote?.archive?.status || !remote.loaded?.status || !remote.indexed?.status) throw new Error("invalid receiver verification response")
+            if (input.authority && (body.store !== "clickhouse" || body.authority_id !== input.authority.authority_id)) throw new Error("verification authority mismatch")
+            if (!remote?.archive?.status || !remote.loaded?.status || !remote.indexed?.status || (input.authority && !remote.backup?.status)) throw new Error("invalid receiver verification response")
             result.archive = remote.archive; result.loaded = remote.loaded; result.indexed = remote.indexed
+            if (input.authority) result.backup = remote.backup!
           } catch (error) {
             const reason = error instanceof Error ? error.message : "verification failed"
             if (result.local.status !== "verified") result.local = unknown(reason)
             else result.archive = unknown(reason)
           }
-          console.error(`${root}/${file.sourcePath}: local=${result.local.status} archive=${result.archive.status} loaded=${result.loaded.status} indexed=${result.indexed.status}`)
+          console.error(`${root}/${file.sourcePath}: local=${result.local.status} ${input.authority ? 'clickhouse_raw' : 'archive'}=${result.archive.status}${result.backup ? ` backup=${result.backup.status}` : ''} loaded=${result.loaded.status} indexed=${result.indexed.status}`)
         }
       } catch (error) { results.push({ ...base(root), local: unknown(error instanceof Error ? error.message : "source scan failed") }) }
     }
   } finally { db?.close() }
-  const complete = results.length > 0 && results.every(row => [row.local, row.archive, row.loaded, row.indexed].every(stage => stage.status === "verified"))
-  const summary = { complete, started_at: startedAt, finished_at: new Date().toISOString(), checked: results.length, incomplete: results.filter(row => [row.local, row.archive, row.loaded, row.indexed].some(stage => stage.status !== "verified")).length }
-  if (input.json) console.log(JSON.stringify({ ...summary, scope: "configured regular JSONL files; point presence and provenance, not relevance quality", files: results }, null, 2))
+  const complete = results.length > 0 && results.every(row => Object.values(stages(row)).every(stage => stage.status === "verified"))
+  const summary = { complete, started_at: startedAt, finished_at: new Date().toISOString(), checked: results.length, incomplete: results.filter(row => Object.values(stages(row)).some(stage => stage.status !== "verified")).length }
+  if (input.json) console.log(JSON.stringify({ ...summary, store: input.authority?.store ?? "s3", scope: input.authority ? "archive field means ClickHouse raw coverage; backup, projection and indexing are separate" : "configured regular JSONL files; point presence and provenance, not relevance quality", files: results }, null, 2))
   else {
     console.log(`Checked ${summary.checked} entries; ${summary.incomplete} incomplete or unverified.`)
-    for (const row of results) for (const [name, stage] of Object.entries({ local: row.local, archive: row.archive, loaded: row.loaded, indexed: row.indexed })) {
+    for (const row of results) for (const [name, stage] of Object.entries(stages(row))) {
       if (stage.status !== "verified" && stage.reason) console.log(`${row.path}: ${name}: ${stage.reason}`)
     }
   }

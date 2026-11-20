@@ -6,6 +6,8 @@ export type SyncConfig = {
   /** The durable session transport. Postgres remains an explicit migration
    *  compatibility mode; new configurations use session-center S3 ingest. */
   transport: "s3" | "postgres"
+  /** HTTP receiver authority. Legacy transport name s3 remains wire-compatible. */
+  store: "s3" | "clickhouse"
   s3_url_env: string
   s3_token_env: string
   database_url_env: string
@@ -82,6 +84,7 @@ const defaults: BetterCompactConfig = {
   sync: {
     enabled: false,
     transport: "s3",
+    store: "s3",
     s3_url_env: "SESSION_CENTER_URL",
     s3_token_env: "S3_SYNC_TOKEN",
     database_url_env: "OPENCODE_SYNC_DATABASE_URL",
@@ -191,6 +194,7 @@ export function validateConfig(value: unknown): BetterCompactConfig {
   }
   if (typeof result.sync.enabled !== "boolean") throw new TypeError("sync.enabled must be boolean")
   if (result.sync.transport !== "s3" && result.sync.transport !== "postgres") throw new TypeError("sync.transport must be s3 or postgres")
+  if (result.sync.store !== "s3" && result.sync.store !== "clickhouse") throw new TypeError("sync.store must be s3 or clickhouse")
   for (const key of ["s3_url_env", "s3_token_env", "database_url_env"] as const) {
     if (typeof result.sync[key] !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(result.sync[key])) throw new TypeError(`sync.${key} must be an environment variable name`)
   }

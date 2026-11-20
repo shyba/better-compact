@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { access, chmod, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { access, chmod, copyFile, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { existsSync, readFileSync } from "node:fs"
 import { execFileSync, spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
@@ -13,6 +13,8 @@ import type { JsonlCheckpoint, JsonlDiscoveryResult, JsonlReconcilePrefix, Jsonl
 import { applyRemoteMigration, ensureRemoteSource, openPostgres, purgeRemoteTombstones, readRemoteFence, recordObservation, uploadFenced } from "../src/postgres.js"
 import { openSyncState, type NormalizedRecord } from "../src/sync-state.js"
 import { decideS3FilePass, discoverS3JsonlSnapshot, hashS3FileSnapshot, planS3Upload, uploadS3File, validateS3Endpoint } from "../src/s3-sync.js"
+import { discoverAuthority, authorityStatePath, pinClickHouseAuthority, drainClickHouseOutbox, uploadClickHouseFile, clickHouseOutboxStats } from "../src/clickhouse-sync.js"
+import { drainGenerations, generationCheckpointed, generationOutboxStats, reconcileAppliedGenerations, stageGeneration, type GenerationIntent } from "../src/clickhouse-generation-outbox.js"
 import { verifySync } from "./sync-verify.js"
 import { inspectCli, cliHelp } from "./cli-help.js"
 
@@ -493,6 +495,46 @@ async function acquireSyncLock(action: string): Promise<{ release: () => Promise
   return { release: () => rm(lock, { recursive: true, force: true }) }
 }
 
+/** One-time legacy → ClickHouse migration. An existing s3-store config
+ * migrates automatically when a ClickHouse receiver advertises on the same
+ * host as the legacy receiver at BETTER_SYNC_CLICKHOUSE_PORT (default 4176).
+ * Fail-closed: 404, outage, auth failure or protocol mismatch all leave the
+ * legacy store untouched for the next pass; nothing is deleted. Idempotent:
+ * once migrated, store is clickhouse and this probe never runs again.
+ * BETTER_SYNC_NO_AUTO_MIGRATE=1 disables it for a host. */
+async function maybeMigrateStoreToClickHouse(config: Awaited<ReturnType<typeof loadConfig>>, allowInsecureRemote?: boolean): Promise<void> {
+  if (config.sync.transport !== "s3" || config.sync.store !== "s3") { console.error("migrate: skip store/transport"); return }
+  if (process.env.BETTER_SYNC_NO_AUTO_MIGRATE === "1") { console.error("migrate: skip no-auto"); return }
+  const legacy = s3EndpointFor(config)
+  if (!legacy || !/^https?:\/\//.test(legacy)) return
+  const parsed = new URL(legacy)
+  const port = Number(process.env.BETTER_SYNC_CLICKHOUSE_PORT ?? 4176)
+  if (!Number.isSafeInteger(port) || port <= 0) return
+  const clickhouseURL = `${parsed.protocol}//${parsed.hostname}:${port}`
+  if (clickhouseURL === legacy.replace(/\/$/, "")) return
+  const token = s3TokenFor(config)
+  if (!token) return
+  let authority
+  try {
+    authority = await discoverAuthority(clickhouseURL, token, AbortSignal.timeout(15_000))
+  } catch (error) {
+    console.error(`legacy store retained; ClickHouse discovery at ${clickhouseURL} failed: ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  if (!authority) return // explicit 404: that endpoint is not a ClickHouse receiver
+  const envFile = path.join(paths.home, "sync.env")
+  if (await exists(envFile)) {
+    const backup = `${envFile}.pre-clickhouse`
+    if (!(await exists(backup))) { await copyFile(envFile, backup); await chmod(backup, 0o600) }
+  }
+  await pinClickHouseAuthority(paths.state, authority, true)
+  await writeSyncEnvironment(clickhouseURL, allowInsecureRemote ?? config.sync.allow_insecure_remote, token, { ...config, sync: { ...config.sync, store: "clickhouse" } })
+  await saveConfig({ ...config, sync: { ...config.sync, store: "clickhouse" } }, paths)
+  if (config.sync.s3_url_env) process.env[config.sync.s3_url_env] = clickhouseURL
+  config.sync.store = "clickhouse"
+  console.log(`migrated sync store to ClickHouse authority ${authority.authority_id} at ${clickhouseURL}; previous configuration preserved`)
+}
+
 async function syncRun(once: boolean, singlePass = false) {
   const config = await loadConfig(paths)
   if (!config.sync.enabled) {
@@ -502,8 +544,14 @@ async function syncRun(once: boolean, singlePass = false) {
   const remoteConfigured = config.sync.transport === "s3" ? Boolean(s3EndpointFor(config) && s3TokenFor(config)) : Boolean(databaseURLFor(config))
   const lock = await acquireSyncLock("running sync")
   if (!lock) return 1
+  try {
+    await maybeMigrateStoreToClickHouse(config, config.sync.allow_insecure_remote)
+  } catch (error) {
+    console.error(`legacy store retained; ClickHouse migration failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
   let stopping = false
   let firstPass = true
+  let lastAuthorityRecovery = 0
   const controller = new AbortController()
   const stop = () => { stopping = true; controller.abort() }
   process.once("SIGTERM", stop)
@@ -511,8 +559,13 @@ async function syncRun(once: boolean, singlePass = false) {
   try {
     do {
       try {
-        const progress = await syncPass(config, controller.signal, { bypassSkip: once, rearmExhausted: !once && firstPass })
-          firstPass = false
+        // Periodically recheck the pinned authority as well as at startup, so
+        // an in-place database restore cannot leave a running daemon believing
+        // that pre-restore receipts are still present.
+        const recoverAuthority = firstPass || Date.now() - lastAuthorityRecovery >= 300_000
+        const progress = await syncPass(config, controller.signal, { bypassSkip: once, rearmExhausted: !once && !singlePass && firstPass, recoverAuthority })
+        if (recoverAuthority) lastAuthorityRecovery = Date.now()
+        firstPass = false
         if (progress.pending === 0) await compactStateIfIdle()
         if (progress.failed && (once || singlePass)) return 1
         if (stopping || singlePass || (once && (!remoteConfigured || (!progress.progress && progress.pending === 0)))) return 0
@@ -522,7 +575,9 @@ async function syncRun(once: boolean, singlePass = false) {
         if (once || singlePass) return 1
       }
       if (stopping) return 0
-      await new Promise((resolve) => setTimeout(resolve, config.sync.poll_interval_ms))
+      // --once drains until a quiet pass; sleeping a daemon poll interval
+      // between successful drain passes makes a bounded one-shot look hung.
+      if (!once) await new Promise((resolve) => setTimeout(resolve, config.sync.poll_interval_ms))
     } while (true)
   } finally {
     process.off("SIGTERM", stop)
@@ -580,7 +635,15 @@ async function syncRetryS3() {
     const root = path.resolve(candidates[0]!.database.replace(/^~(?=\/|$)/, process.env.HOME ?? "."))
     const sourceID = createHash("sha256").update(`${kind}\n${root}`).digest("hex").slice(0, 32)
     const failurePath = !rawPath || rawPath === "__source__" ? s3SourceFailurePath : rawPath
-    const state = await openSyncState(paths.state)
+    let authority
+    if (config.sync.store === "clickhouse") {
+      const endpoint = s3EndpointFor(config), token = s3TokenFor(config)
+      if (!endpoint || !token) throw new Error("ClickHouse receiver URL/token required")
+      authority = await discoverAuthority(validateS3Endpoint(endpoint, config.sync.allow_insecure_remote), token)
+      if (!authority) throw new Error("ClickHouse commit authority required; legacy receiver refused")
+      await pinClickHouseAuthority(paths.state, authority, false)
+    }
+    const state = await openSyncState(authorityStatePath(paths.state, authority))
     try {
       if (all) {
         const cleared = state.clearAllS3FailuresWithAudit(sourceID, "retry-s3 --all")
@@ -670,7 +733,7 @@ async function compactStateIfIdle() {
   }
 }
 
-async function syncPass(config: Awaited<ReturnType<typeof loadConfig>>, signal?: AbortSignal, options: { bypassSkip?: boolean; localOnly?: boolean } = {}) {
+async function syncPass(config: Awaited<ReturnType<typeof loadConfig>>, signal?: AbortSignal, options: { bypassSkip?: boolean; localOnly?: boolean; rearmExhausted?: boolean; recoverAuthority?: boolean } = {}) {
   if (config.sync.transport === "s3") {
     const endpoint = s3EndpointFor(config)
     const token = s3TokenFor(config)
@@ -801,7 +864,7 @@ async function syncPass(config: Awaited<ReturnType<typeof loadConfig>>, signal?:
  * state records only the last acknowledged file version; S3 remains the
  * durable source of truth and its file_id replay contract makes a crash
  * between PUT and the local acknowledgement safe. */
-async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal?: AbortSignal, options: { bypassSkip?: boolean } = {}) {
+async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal?: AbortSignal, options: { bypassSkip?: boolean; rearmExhausted?: boolean; recoverAuthority?: boolean } = {}) {
   const endpointValue = s3EndpointFor(config)
   const token = s3TokenFor(config)
   if (!endpointValue) {
@@ -813,10 +876,37 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
     return { progress: false, pending: 0, failed: true }
   }
   const endpoint = validateS3Endpoint(endpointValue, config.sync.allow_insecure_remote)
-  const state = await openSyncState(paths.state)
+  const authority = config.sync.store === "clickhouse" ? await discoverAuthority(endpoint, token, signal) : undefined
+  if (config.sync.store === "clickhouse" && !authority) throw new Error("ClickHouse commit authority required; legacy receiver refused")
+  if (authority && (authority.generation_protocol !== 1 || authority.generation_status_protocol !== 1)) throw new Error("ClickHouse receiver lacks required generation recovery protocol")
+  if (authority) await pinClickHouseAuthority(paths.state, authority, true)
+  const state = await openSyncState(authorityStatePath(paths.state, authority))
   let progressed = false
   let failed = false
+  const destination = { endpoint, token, ...(signal ? { signal } : {}) }
+  const applyGeneration = (intent: GenerationIntent) => state.db.transaction(() => {
+    const current = state.s3File(intent.source_id, intent.path)
+    if (current?.fileID === intent.file_id) {
+      if (current.size !== intent.size || current.sha256 !== intent.sha256) throw new Error("generation checkpoint identity conflict")
+    } else {
+      if ((current?.fileID ?? null) !== intent.predecessor) throw new Error("generation checkpoint predecessor mismatch; preserving outbox")
+      state.recordS3File(intent.source_id, intent.path, { fileID: intent.file_id, size: intent.size, mtimeMs: intent.mtime_ms, sha256: intent.sha256 })
+    }
+    const failure = state.s3Failure(intent.source_id, intent.path)
+    if (failure && failure.size === intent.size && failure.mtimeMs === intent.mtime_ms) state.clearS3Failure(intent.source_id, intent.path)
+  })()
   try {
+    if (authority) {
+      // An applied marker must not survive a power loss that loses its SQLite
+      // checkpoint. FULL makes the checkpoint transaction durable first.
+      state.db.exec("PRAGMA synchronous=FULL")
+      if (options.recoverAuthority) {
+        const recovery = await reconcileAppliedGenerations(destination, authority)
+        if (recovery.checked) console.log(`verified ${recovery.checked} retained generations; replayed ${recovery.repaired}`)
+      }
+      await drainClickHouseOutbox(destination, authority)
+      await drainGenerations(destination, authority, applyGeneration)
+    }
     const installation = state.ensureDefaultInstallation("default", "s3", "s3")
     const seenRoots = new Set<string>()
     for (const source of config.sources) {
@@ -892,6 +982,10 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
         for (const file of snapshot.files) {
           if (signal?.aborted) { scanCovered = false; break }
           const previous = state.s3File(sourceID, file.sourcePath)
+          // Pre-generation implementations may have advanced a segment-only
+          // checkpoint. Never treat it as proof of a committed file version.
+          const hasGeneration = !authority || !previous || await generationCheckpointed(authority, sourceID, previous.fileID,
+            { path: file.sourcePath, size: previous.size, sha256: previous.sha256 })
           const failure = state.s3Failure(sourceID, file.sourcePath)
           if (!options.bypassSkip && failure && !state.s3FailureDue(sourceID, file.sourcePath)) {
             const metadataChanged = failure.size !== file.size || failure.mtimeMs !== file.mtimeMs
@@ -905,7 +999,7 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
             state.clearS3Failure(sourceID, file.sourcePath)
           }
           if (options.bypassSkip) state.clearS3Failure(sourceID, file.sourcePath)
-          const metadataChanged = !previous || previous.size !== file.size || previous.mtimeMs !== file.mtimeMs
+          const metadataChanged = !previous || !hasGeneration || previous.size !== file.size || previous.mtimeMs !== file.mtimeMs
           // A manual pass hashes whatever it finds; the service waits for a file
           // to settle first so an actively written session is never hashed while
           // it is still growing.
@@ -935,17 +1029,29 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
             if (afterHash.size !== file.size || afterHash.mtimeMs !== file.mtimeMs) throw new Error("file changed during hashing; retry next pass")
             // A previous failure may have occurred after remote acceptance.
             // Start a complete version rather than appending from a stale ACK.
-            const plan = planS3Upload(file.sourcePath, file, hashed.sha256, failure ? undefined : previous, hashed.prefixSha256, sourceID)
+            const plan = planS3Upload(file.sourcePath, file, hashed.sha256, failure || !hasGeneration ? undefined : previous, hashed.prefixSha256, sourceID)
             if (plan.action === "skip") {
               if (previous?.mtimeMs !== plan.version.mtimeMs) state.recordS3File(sourceID, file.sourcePath, plan.version)
               state.clearS3Failure(sourceID, file.sourcePath)
               continue
             }
-            await uploadS3File({ endpoint, token, fileID: plan.fileID, sourcePath: file.sourcePath, filename: file.filename, size: plan.version.size, start: plan.start, full: plan.full, source: { id: sourceID, kind: source.kind, locator: root }, ...(signal ? { signal } : {}) })
+            const upload = { endpoint, token, fileID: plan.fileID, sourcePath: file.sourcePath, filename: file.filename, size: plan.version.size, start: plan.start, full: plan.full, source: { id: sourceID, kind: source.kind, locator: root }, ...(signal ? { signal } : {}) }
+            if (authority) {
+              await stageGeneration({ authority: authority.authority_id, source_id: sourceID, file_id: plan.fileID,
+                path: file.sourcePath, start: plan.start, size: plan.version.size, sha256: plan.version.sha256,
+                parent: plan.full ? null : previous?.fileID ?? null, predecessor: previous?.fileID ?? null,
+                mtime_ms: plan.version.mtimeMs, segment_bytes: Math.min(authority.max_segment_bytes, 8 * 1024 * 1024), created_at: Date.now() }, authority, config.sync.max_outbox_bytes)
+              await uploadClickHouseFile(upload, authority, config.sync.max_outbox_bytes)
+            } else await uploadS3File(upload)
             const afterUpload = await stat(file.filename)
             if (afterUpload.size !== file.size || afterUpload.mtimeMs !== file.mtimeMs) throw new Error("file changed during upload; receipt not advanced")
-            state.recordS3File(sourceID, file.sourcePath, plan.version)
-            state.clearS3Failure(sourceID, file.sourcePath)
+            if (authority) {
+              await drainGenerations(destination, authority, applyGeneration)
+              if (state.s3File(sourceID, file.sourcePath)?.fileID !== plan.fileID) throw new Error("generation remains uncommitted; outbox retained")
+            } else {
+              state.recordS3File(sourceID, file.sourcePath, plan.version)
+              state.clearS3Failure(sourceID, file.sourcePath)
+            }
             uploaded++
             progressed = true
           } catch (error) {
@@ -998,6 +1104,13 @@ async function syncS3Pass(config: Awaited<ReturnType<typeof loadConfig>>, signal
       }
       if (failureRecorded) continue
     }
+    if (authority) {
+      const remaining = await drainGenerations(destination, authority, applyGeneration)
+      if (remaining.pending) {
+        failed = true
+        console.error(`warning: ${remaining.pending} generation intent(s) remain incomplete; durable outbox retained`)
+      }
+    }
     return { progress: progressed, pending: 0, failed }
   } finally {
     state.close()
@@ -1011,17 +1124,33 @@ async function syncSetup() {
     const syncURL = await setupSyncURL(existing)
     const transport = syncURL.startsWith("http://") || syncURL.startsWith("https://") ? "s3" as const : "postgres" as const
     const token = transport === "s3" ? await setupS3Token(existing) : undefined
+    let store = existing.sync.store
     if (transport === "s3") {
-      validateS3Endpoint(syncURL, allowInsecureRemote)
+      const endpoint = validateS3Endpoint(syncURL, allowInsecureRemote)
       if (!token || token.length < 16) throw new Error(`no session-center bearer token supplied; use --token, --token-stdin, or set ${existing.sync.s3_token_env}`)
+      // An explicit 404 is the legacy protocol. Any outage, authentication
+      // error, malformed response or incompatible ClickHouse endpoint fails
+      // setup before changing configuration; it must not silently choose S3.
+      const advertised = await discoverAuthority(endpoint, token)
+      if (advertised) {
+        if (advertised.generation_protocol !== 1 || advertised.generation_status_protocol !== 1) throw new Error("ClickHouse receiver lacks required generation recovery protocol")
+        await pinClickHouseAuthority(paths.state, advertised, true)
+        store = "clickhouse"
+      } else {
+        if (existing.sync.store === "clickhouse") throw new Error("refusing to replace a configured ClickHouse authority with a legacy endpoint")
+        store = "s3"
+      }
     } else {
       assertPostgresURL(syncURL, allowInsecureRemote)
+      // `store` describes the HTTP receiver only; retaining clickhouse here
+      // would make status/verify try HTTP discovery in explicit Postgres mode.
+      store = "s3"
     }
     const sources = existing.sources.length ? existing.sources : await availableDefaultSyncSources(transport)
-    const environmentFile = await writeSyncEnvironment(syncURL, allowInsecureRemote, token, { ...existing, sync: { ...existing.sync, transport } })
+    const environmentFile = await writeSyncEnvironment(syncURL, allowInsecureRemote, token, { ...existing, sync: { ...existing.sync, transport, store } })
     await saveConfig({
       ...existing,
-      sync: { ...existing.sync, enabled: true, transport, allow_insecure_remote: allowInsecureRemote },
+      sync: { ...existing.sync, enabled: true, transport, store, allow_insecure_remote: allowInsecureRemote },
       sources,
     }, paths)
     console.log(`configured sync in ${paths.config}`)
@@ -1195,28 +1324,46 @@ async function syncVerify() {
   const endpoint = s3EndpointFor(config)
   const token = s3TokenFor(config)
   if (!endpoint || !token) { console.error("configure S3 sync URL and token before verification"); return 2 }
-  return verifySync({ sources: config.sources, state: paths.state, endpoint: validateS3Endpoint(endpoint, config.sync.allow_insecure_remote), token, json: process.argv.includes("--json") })
+  const validatedEndpoint = validateS3Endpoint(endpoint, config.sync.allow_insecure_remote)
+  const authority = config.sync.store === "clickhouse" ? await discoverAuthority(validatedEndpoint, token) : undefined
+  if (config.sync.store === "clickhouse" && !authority) throw new Error("ClickHouse commit authority required")
+  if (authority) await pinClickHouseAuthority(paths.state, authority, false)
+  return verifySync({ sources: config.sources, state: authorityStatePath(paths.state, authority), endpoint: validatedEndpoint, token, json: process.argv.includes("--json"), ...(authority ? { authority } : {}) })
 }
 
 async function syncStatus() {
   const config = await loadConfig(paths)
-  console.log(`state: ${paths.state}`)
+  let statePath = paths.state
+  if (config.sync.store === "clickhouse") {
+    const endpoint = s3EndpointFor(config), token = s3TokenFor(config)
+    if (!endpoint || !token) throw new Error("ClickHouse receiver URL/token required")
+    const authority = await discoverAuthority(validateS3Endpoint(endpoint, config.sync.allow_insecure_remote), token)
+    if (!authority) throw new Error("ClickHouse commit authority required")
+    await pinClickHouseAuthority(paths.state, authority, false)
+    statePath = authorityStatePath(paths.state, authority)
+    const outbox = await clickHouseOutboxStats(authority)
+    console.log(`durable ClickHouse outbox: ${outbox.pending} pending, ${outbox.retained} committed and retained / ${outbox.bytes} bytes (limit ${config.sync.max_outbox_bytes})`)
+    if (outbox.oldestRetainedAt !== undefined) console.log(`oldest retained ClickHouse segment: ${new Date(outbox.oldestRetainedAt).toISOString()}; backup inclusion unverified`)
+    const generations = await generationOutboxStats(authority)
+    console.log(`ClickHouse generations: ${generations.pending} pending, ${generations.committed} committed awaiting checkpoint, ${generations.applied} checkpointed`)
+  }
+  console.log(`state: ${statePath}`)
   // Pacing is the first thing to check when a host looks busy: a file is hashed
   // once it has been quiet for settle_ms, a full deep verify runs every
   // rescan_ms, and the loop wakes every poll_ms.
   console.log(`sync pacing: poll ${config.sync.poll_interval_ms}ms, rescan ${config.sync.rescan_interval_ms}ms, settle ${config.sync.settle_ms}ms, deep verify ${(config.sync.deep_verify_bytes_per_pass / 1048576).toFixed(0)} MiB/pass, retry ${config.sync.failure_retry_interval_ms}ms x${config.sync.failure_retry_attempts}`)
-  if (!(await access(paths.state).then(() => true).catch(() => false))) {
-    console.log("pending outbox: 0")
-    console.log("outbox bytes: 0")
+  if (!(await access(statePath).then(() => true).catch(() => false))) {
+    console.log(`${config.sync.store === "clickhouse" ? "normalized " : ""}pending outbox: 0`)
+    console.log(`${config.sync.store === "clickhouse" ? "normalized " : ""}outbox bytes: 0`)
     return 0
   }
-  const db = new Database(paths.state, { readonly: true })
+  const db = new Database(statePath, { readonly: true })
   try {
     db.exec("pragma query_only=on; pragma busy_timeout=5000")
     const pending = db.query("select count(*) as value from outbox").get() as { value: number }
     const bytes = db.query("select coalesce(sum(length(coalesce(payload_json,'') || coalesce(routing_json,''))), 0) as value from outbox").get() as { value: number }
-    console.log(`pending outbox: ${Number(pending.value)}`)
-    console.log(`outbox bytes: ${Number(bytes.value)}`)
+    console.log(`${config.sync.store === "clickhouse" ? "normalized " : ""}pending outbox: ${Number(pending.value)}`)
+    console.log(`${config.sync.store === "clickhouse" ? "normalized " : ""}outbox bytes: ${Number(bytes.value)}`)
     if (config.sync.transport === "s3") {
       const hasS3FileTable = db.query("select 1 from sqlite_master where type='table' and name='s3_file'").get() !== null
       const files = hasS3FileTable

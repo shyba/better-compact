@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly better-sync incremental backup trigger
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=60
+Unit=better-sync-backup.service
+
+[Install]
+WantedBy=timers.target

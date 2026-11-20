@@ -1,0 +1,25 @@
+[Unit]
+Description=better-sync isolated ClickHouse projection shadow (not production VCC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/better-sync/clickhouse-shadow
+EnvironmentFile=%h/.config/better-sync/clickhouse.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Configure VCC_HOME and the native ClickHouse driver path in the protected
+# environment file or a drop-in. Keep the shadow root on bounded local storage.
+ExecStart=/usr/bin/python3 -u %h/.local/share/better-sync/clickhouse-shadow/shadow_worker.py --root %h/.local/state/better-sync/shadow
+Restart=on-failure
+RestartSec=30
+MemoryMax=512M
+CPUQuota=50%
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

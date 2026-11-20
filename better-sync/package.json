@@ -21,6 +21,7 @@
     "scripts/cli-help.ts",
     "scripts/sync-verify.ts",
     "scripts/rag_worker.py",
+    "scripts/clickhouse",
     "db/migrations",
     "install.sh",
     "install-sync-only.sh",

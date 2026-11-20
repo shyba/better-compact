@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { Database } from "bun:sqlite"
 import { openSyncState } from "../src/sync-state.js"
+import { authorityStatePath, pinClickHouseAuthority } from "../src/clickhouse-sync.js"
 
 const temporary: string[] = []
 
@@ -267,6 +268,44 @@ describe("better-compact sync setup", () => {
     expect(await Bun.file(config).exists()).toBe(false)
     expect(await Bun.file(path.join(stateHome, "sync.env")).exists()).toBe(false)
   })
+
+  test("HTTP setup discovers and pins ClickHouse, preserves legacy 404, and fails closed on outages", async () => {
+    let mode:'clickhouse'|'legacy'|'outage'|'incompatible'='clickhouse'
+    const authority={store:'clickhouse',protocol:1,authority_id:'test-authority-000001',max_segment_bytes:1024,generation_protocol:1,generation_status_protocol:1}
+    const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch:() => {
+      if (mode==='legacy') return new Response('',{status:404})
+      if (mode==='outage') return new Response('',{status:503})
+      return Response.json(mode==='incompatible'?{...authority,generation_status_protocol:0}:authority)
+    }})
+    async function setup() {
+      const root=await mkdtemp(path.join(os.tmpdir(),'sync-setup-store-'));temporary.push(root)
+      const config=path.join(root,'config.json'),home=path.join(root,'state')
+      const result=await runCLI(['sync','setup','--url',server.url.toString(),'--token','test-token-long-enough'],
+        {HOME:root,BETTER_COMPACT_CONFIG:config,BETTER_COMPACT_HOME:home})
+      return {root,config,home,result}
+    }
+    try {
+      const ch=await setup()
+      expect(ch.result.exitCode).toBe(0)
+      expect(JSON.parse(await readFile(ch.config,'utf8')).sync.store).toBe('clickhouse')
+      expect(JSON.parse(await readFile(path.join(ch.home,'state.sqlite.clickhouse-authority.json'),'utf8')).authority_id).toBe(authority.authority_id)
+      mode='legacy';const old=await setup()
+      expect(old.result.exitCode).toBe(0)
+      expect(JSON.parse(await readFile(old.config,'utf8')).sync.store).toBe('s3')
+      mode='outage';const outage=await setup()
+      expect(outage.result.exitCode).toBe(2)
+      expect(await Bun.file(outage.config).exists()).toBe(false)
+      expect(await Bun.file(path.join(outage.home,'sync.env')).exists()).toBe(false)
+      mode='incompatible';const incompatible=await setup()
+      expect(incompatible.result.exitCode).toBe(2)
+      expect(await Bun.file(incompatible.config).exists()).toBe(false)
+      mode='legacy'
+      const downgrade=await runCLI(['sync','setup','--url',server.url.toString(),'--token','test-token-long-enough'],
+        {HOME:ch.root,BETTER_COMPACT_CONFIG:ch.config,BETTER_COMPACT_HOME:ch.home})
+      expect(downgrade.exitCode).toBe(2)
+      expect(JSON.parse(await readFile(ch.config,'utf8')).sync.store).toBe('clickhouse')
+    } finally {server.stop(true)}
+  })
 })
 
 describe("better-compact RAG setup", () => {
@@ -353,6 +392,84 @@ describe("better-compact sync run --once", () => {
     const keys = db.query("select natural_key from normalized_record where record_kind='message' order by natural_key").all().map((row) => String((row as { natural_key: string }).natural_key))
     db.close()
     expect(keys).toContain("2026/08/14/rollout-once.jsonl|line:1")
+  })
+})
+
+describe("legacy → ClickHouse automatic store migration", () => {
+  const authority = { store: "clickhouse", protocol: 1, authority_id: "fleet-authority-00001", max_segment_bytes: 65536, generation_protocol: 1, generation_status_protocol: 1 }
+
+  async function legacyInstall(root: string) {
+    const sessions = path.join(root, "sessions")
+    await mkdir(sessions)
+    await writeFile(path.join(sessions, "fixture.jsonl"), [JSON.stringify({ type: "session_meta", payload: { id: "55555555-5555-7555-8555-555555555555", timestamp: "2026-08-14T10:00:00.000Z", cwd: "/repo" } }), JSON.stringify({ timestamp: "2026-08-14T10:00:01.000Z", type: "event_msg", payload: { type: "user_message", message: "hello" } })].join("\n") + "\n")
+    const config = path.join(root, "config.json"), state = path.join(root, "state.sqlite"), home = path.join(root, "home")
+    await mkdir(home, { recursive: true })
+    await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3", store: "s3", s3_url_env: "SESSION_CENTER_URL", s3_token_env: "S3_SYNC_TOKEN", settle_ms: 0 }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
+    await writeFile(path.join(home, "sync.env"), 'SESSION_CENTER_URL="http://127.0.0.1:9"\nS3_SYNC_TOKEN="token-token-token"\n', { mode: 0o600 })
+    return { sessions, config, state, home }
+  }
+
+  function clickhouseStub(extra: Record<string, string> = {}) {
+    const uploads: Array<{ file: string; sha: string | null }> = []
+    const server = Bun.serve({ port: 0, async fetch(request) {
+      const url = new URL(request.url)
+      if (url.pathname === "/capabilities") return Response.json(authority)
+      if (url.pathname === "/generation/status") return new Response("", { status: 404 })
+      if (url.pathname === "/generation") return Response.json({ ...(await request.json() as Record<string, unknown>), authority_id: authority.authority_id, store: "clickhouse", committed: true })
+      if (url.pathname === "/verify") { const body = await request.json() as { files: Array<{ file_id: string }> }; return Response.json({ authority_id: authority.authority_id, store: "clickhouse", files: [{ file_id: body.files[0]!.file_id, archive: { status: "unknown" } }] }) }
+      const raw = await request.text()
+      uploads.push({ file: decodeURIComponent(url.pathname.slice(6)), sha: request.headers.get("x-vcc-sha256") })
+      const fileID = decodeURIComponent(url.pathname.slice(6))
+      return Response.json({ authority_id: authority.authority_id, store: "clickhouse", committed: true, sha256: request.headers.get("x-vcc-sha256"), source_id: request.headers.get("x-vcc-source-id"), source_kind: request.headers.get("x-vcc-source-kind"), locator: request.headers.get("x-vcc-source-locator"), file_id: fileID, start: Number(request.headers.get("x-vcc-start") ?? 0), size: raw.length, path: request.headers.get("x-vcc-path"), full: request.headers.get("x-vcc-full") === "true" })
+    }, ...extra } as never)
+    return { server, uploads }
+  }
+
+  test("migrates a legacy s3 store automatically when the ClickHouse receiver advertises", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-migrate-")); temporary.push(root)
+    const install = await legacyInstall(root)
+    const { server, uploads } = clickhouseStub()
+    const legacy = Bun.serve({ port: 0, fetch: async () => new Response("", { status: 404 }) })
+    try {
+      const result = await runCLI(["sync", "run", "--once"], {
+        HOME: root, BETTER_COMPACT_CONFIG: install.config, BETTER_COMPACT_STATE: install.state, BETTER_COMPACT_HOME: install.home,
+        SESSION_CENTER_URL: `http://127.0.0.1:${legacy.port}`, S3_SYNC_TOKEN: "token-token-token",
+        BETTER_SYNC_CLICKHOUSE_PORT: String(server.port),
+      })
+      expect(result.exitCode === 0 ? "ok" : result.stdout + result.stderr).toBe("ok")
+      expect(result.stdout).toContain("migrated sync store to ClickHouse authority")
+      const saved = JSON.parse(await readFile(install.config, "utf8")) as { sync: { store: string } }
+      expect(saved.sync.store).toBe("clickhouse")
+      const env = await readFile(path.join(install.home, "sync.env"), "utf8")
+      expect(env).toContain(`SESSION_CENTER_URL="http://127.0.0.1:${server.port}"`)
+      expect(await readFile(`${path.join(install.home, "sync.env")}.pre-clickhouse`, "utf8")).toContain('SESSION_CENTER_URL="http://127.0.0.1:9"') // the original legacy route, preserved for rollback
+      const pin = path.join(install.state + ".clickhouse-" + authorityStatePath(install.state, authority as never).slice(-24))
+      expect(await Bun.file(pin).exists()).toBe(true)
+      expect(uploads.length).toBeGreaterThan(0) // the run continued on ClickHouse in-process
+    } finally { server.stop(true); legacy.stop(true) }
+  })
+
+  test("fails closed: without a ClickHouse receiver the legacy store is retained and used", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "better-compact-migrate-")); temporary.push(root)
+    const install = await legacyInstall(root)
+    const legacy = Bun.serve({ port: 0, async fetch(request) {
+      if (new URL(request.url).pathname === "/capabilities") return new Response("", { status: 404 })
+      return new Response(null, { status: 204 })
+    } })
+    try {
+      const result = await runCLI(["sync", "run", "--once"], {
+        HOME: root, BETTER_COMPACT_CONFIG: install.config, BETTER_COMPACT_STATE: install.state, BETTER_COMPACT_HOME: install.home,
+        SESSION_CENTER_URL: `http://127.0.0.1:${legacy.port}`, S3_SYNC_TOKEN: "token-token-token",
+        BETTER_SYNC_CLICKHOUSE_PORT: "1",
+      })
+      expect(result.exitCode === 0 ? "ok" : result.stdout + result.stderr).toBe("ok")
+      expect(result.stdout + result.stderr).toContain("legacy store retained")
+      const saved = JSON.parse(await readFile(install.config, "utf8")) as { sync: { store: string } }
+      expect(saved.sync.store).toBe("s3")
+      const env = await readFile(path.join(install.home, "sync.env"), "utf8")
+      expect(env).toBe('SESSION_CENTER_URL="http://127.0.0.1:9"\nS3_SYNC_TOKEN="token-token-token"\n') // unchanged: fail-closed rewrote nothing
+      expect(await Bun.file(`${path.join(install.home, "sync.env")}.pre-clickhouse`).exists()).toBe(false)
+    } finally { legacy.stop(true) }
   })
 })
 
@@ -730,6 +847,101 @@ globalThis.fetch = async (_url, init = {}) => {
     expect(Number.isSafeInteger(audit.failure_updated_at)).toBe(true)
     expect(ack).toEqual({ file_id: "file-1", size: 10, mtime_ms: 20, sha256: "sha-1" })
     expect(checkpoint).toEqual({ preserved: true })
+  })
+
+  test("ClickHouse generation lost acknowledgement recovers before a new scan", async () => {
+    const root=await mkdtemp(path.join(os.tmpdir(),"ch-generation-cli-"));temporary.push(root)
+    const sessions=path.join(root,"sessions");await mkdir(sessions)
+    const file=path.join(sessions,"fixture.jsonl");await writeFile(file,'{"type":"session","id":"x"}\n')
+    const statePath=path.join(root,"state.sqlite"),config=path.join(root,"config.json")
+    const authority={store:"clickhouse",protocol:1,authority_id:"test-authority-000001",max_segment_bytes:1024,generation_protocol:1,generation_status_protocol:1}
+    let lost=true,generationCalls=0
+    const generationBodies:Array<Record<string,unknown>>=[]
+    const committed=new Map<string,Record<string,unknown>>()
+    const server=Bun.serve({hostname:"127.0.0.1",port:0,async fetch(request) {
+      const url=new URL(request.url)
+      if (url.pathname==="/capabilities") return Response.json(authority)
+      if (url.pathname==="/generation/status") {
+        const body=await request.json() as Record<string,unknown>, record=committed.get(String(body.file_id))
+        return record ? Response.json({...record,authority_id:authority.authority_id,store:"clickhouse",committed:true}) : new Response("",{status:404})
+      }
+      if (url.pathname==="/verify") {
+        const body=await request.json() as {files:Array<{file_id:string}>}
+        return Response.json({authority_id:authority.authority_id,store:"clickhouse",files:[{file_id:body.files[0]!.file_id,archive:{status:committed.has(body.files[0]!.file_id)?"verified":"unknown"}}]})
+      }
+      if (url.pathname==="/generation") {
+        const body=await request.json() as Record<string,unknown>;generationBodies.push(body);generationCalls++;committed.set(String(body.file_id),body)
+        if (lost) { lost=false;return new Response("",{status:503}) }
+        return Response.json({...body,authority_id:authority.authority_id,store:"clickhouse",committed:true})
+      }
+      const data=await request.arrayBuffer()
+      return Response.json({authority_id:authority.authority_id,store:"clickhouse",committed:true,
+        sha256:request.headers.get("x-vcc-sha256"),source_id:request.headers.get("x-vcc-source-id"),
+        source_kind:request.headers.get("x-vcc-source-kind"),locator:request.headers.get("x-vcc-source-locator"),
+        file_id:decodeURIComponent(url.pathname.slice("/file/".length)),path:request.headers.get("x-vcc-path"),
+        start:Number(request.headers.get("x-vcc-start")),size:data.byteLength,full:request.headers.get("x-vcc-full")==="true"})
+    }})
+    try {
+      await writeFile(config,JSON.stringify({version:1,sync:{enabled:true,transport:"s3",store:"clickhouse",settle_ms:0},sources:[{kind:"pi-jsonl",database:sessions}]}))
+      const env={HOME:root,BETTER_COMPACT_CONFIG:config,BETTER_COMPACT_STATE:statePath,BETTER_SYNC_OUTBOX:path.join(root,"outbox"),SESSION_CENTER_URL:server.url.toString(),S3_SYNC_TOKEN:"test-token-long-enough"}
+      // Simulate an upgrade from the older segment-only ClickHouse sender.
+      // Even unchanged source bytes must receive a new full generation.
+      const sourceID=createHash("sha256").update(`pi-jsonl\n${sessions}`).digest("hex").slice(0,32)
+      const oldState=await openSyncState(authorityStatePath(statePath,authority))
+      oldState.ensureInstallation("install","incarnation")
+      oldState.upsertSource({id:sourceID,installationID:"install",kind:"pi-jsonl",schemaVersion:1,locator:sessions,incarnation:"incarnation"})
+      const fileStat=await stat(file), bytes=await readFile(file)
+      oldState.recordS3File(sourceID,"fixture.jsonl",{fileID:"old-segment-only",size:fileStat.size,mtimeMs:fileStat.mtimeMs,sha256:createHash("sha256").update(bytes).digest("hex")})
+      oldState.close()
+      const first=await runCLI(["sync","run","--once"],env)
+      expect(first.exitCode).toBe(1)
+      const second=await runCLI(["sync","run","--once"],env)
+      expect(second.exitCode).toBe(0)
+      expect(generationCalls).toBe(2)
+      expect(generationBodies[1]).toEqual(generationBodies[0])
+      expect(generationBodies[0]).toMatchObject({start:0,parent:null})
+      const state=await openSyncState(authorityStatePath(statePath,authority))
+      try {
+        expect(state.s3File(sourceID,"fixture.jsonl")?.fileID).toBe(generationBodies[0]!.file_id)
+      } finally {state.close()}
+    } finally {server.stop(true)}
+  })
+
+  test("targeted retries clear only the selected ClickHouse authority state", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "ch-retry-")); temporary.push(root)
+    const sessions = path.join(root, "sessions"); await mkdir(sessions)
+    const statePath = path.join(root, "state.sqlite"), config = path.join(root, "config.json")
+    const authority = { store: "clickhouse" as const, protocol: 1 as const, authority_id: "test-authority-000001", max_segment_bytes: 1024 }
+    const sourceID = createHash("sha256").update(`codex-jsonl\n${sessions}`).digest("hex").slice(0, 32)
+    for (const name of [statePath, authorityStatePath(statePath, authority)]) {
+      const state = await openSyncState(name)
+      state.ensureInstallation("install", "incarnation")
+      state.upsertSource({ id: sourceID, installationID: "install", kind: "codex-jsonl", schemaVersion: 1, locator: sessions, incarnation: "incarnation" })
+      state.recordS3Failure(sourceID, "target.jsonl", { size: 1, mtimeMs: 2 }, "failure", 1, 60000)
+      state.close()
+    }
+    await pinClickHouseAuthority(statePath, authority, true)
+    let online = true, changed = false
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => online ? Response.json(changed ? { ...authority, authority_id: "different-authority-001" } : authority) : new Response("", { status: 503 }) })
+    try {
+      await writeFile(config, JSON.stringify({ version: 1, sync: { enabled: true, transport: "s3", store: "clickhouse" }, sources: [{ kind: "codex-jsonl", database: sessions }] }))
+      const env = { HOME: root, BETTER_COMPACT_CONFIG: config, BETTER_COMPACT_STATE: statePath, SESSION_CENTER_URL: server.url.toString(), S3_SYNC_TOKEN: "test-token-long-enough" }
+      online = false
+      const failed = await runCLI(["sync", "retry-s3", "--kind", "codex-jsonl", "--path", "target.jsonl"], env)
+      expect(failed.exitCode).not.toBe(0)
+      online = true; changed = true
+      const changedResult = await runCLI(["sync", "retry-s3", "--kind", "codex-jsonl", "--path", "target.jsonl"], env)
+      expect(changedResult.exitCode).not.toBe(0)
+      expect(changedResult.stderr).toContain("authority changed")
+      changed = false
+      const ok = await runCLI(["sync", "retry-s3", "--kind", "codex-jsonl", "--path", "target.jsonl"], env)
+      expect(ok.exitCode).toBe(0)
+      const legacy = await openSyncState(statePath), target = await openSyncState(authorityStatePath(statePath, authority))
+      try {
+        expect(legacy.s3Failure(sourceID, "target.jsonl")).toBeDefined()
+        expect(target.s3Failure(sourceID, "target.jsonl")).toBeUndefined()
+      } finally { legacy.close(); target.close() }
+    } finally { server.stop(true) }
   })
 
 })
