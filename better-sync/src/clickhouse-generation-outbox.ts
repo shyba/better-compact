@@ -154,7 +154,7 @@ async function postGeneration(input: Destination, authority: Authority, intent: 
   const body = generationBody(intent)
   const response = await fetch(`${input.endpoint.replace(/\/$/, "")}/generation`, {
     method: "POST", headers: { Authorization: `Bearer ${input.token}`, "content-type": "application/json" },
-    body: JSON.stringify(body), signal: input.signal ?? AbortSignal.timeout(120_000),
+    body: JSON.stringify(body), signal: input.signal ?? AbortSignal.timeout(600_000),
   })
   if (!response.ok) throw new Error(`ClickHouse generation HTTP ${response.status}; durable intent retained`)
   checkReceipt(await response.json() as Record<string, unknown>, authority, body)
@@ -220,7 +220,7 @@ async function generationRawVerified(input: Destination, authority: Authority, i
   const item = { source_id: intent.source_id, file_id: intent.file_id, path: intent.path, size: intent.size, sha256: intent.sha256 }
   const response = await fetch(`${input.endpoint.replace(/\/$/, "")}/verify`, {
     method: "POST", headers: { Authorization: `Bearer ${input.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ files: [item] }), signal: input.signal ?? AbortSignal.timeout(120_000),
+    body: JSON.stringify({ files: [item] }), signal: input.signal ?? AbortSignal.timeout(600_000),
   })
   if (!response.ok) throw new Error(`ClickHouse generation verification HTTP ${response.status}; retained data preserved`)
   const result = await response.json() as { store?: unknown; authority_id?: unknown; files?: Array<{ file_id?: unknown; archive?: { status?: unknown } }> }
@@ -254,13 +254,37 @@ export async function reconcileAppliedGenerations(input: Destination, authority:
   // First restore missing receipts in predecessor order. A successful generation
   // insertion itself verifies its full ancestry at the receiver.
   for (const { intent } of applied) {
-    const status = await fetch(`${input.endpoint.replace(/\/$/, "")}/generation/status`, {
-      method: "POST", headers: { Authorization: `Bearer ${input.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ source_id: intent.source_id, file_id: intent.file_id }),
-      signal: input.signal ?? AbortSignal.timeout(30_000),
-    })
+    // Transient receiver statuses (429 slot contention, 5xx under load) are
+    // retried; they must not abort recovery for every retained generation.
+    let status: Response | undefined
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 2000 * 2 ** (attempt - 1)))
+      try {
+        status = await fetch(`${input.endpoint.replace(/\/$/, "")}/generation/status`, {
+          method: "POST", headers: { Authorization: `Bearer ${input.token}`, "content-type": "application/json" },
+          body: JSON.stringify({ source_id: intent.source_id, file_id: intent.file_id }),
+          signal: input.signal ?? AbortSignal.timeout(120_000),
+        })
+        if (status.status === 200 || status.status === 404) break
+      } catch (error) {
+        if (input.signal?.aborted) throw error
+        status = undefined
+      }
+    }
+    if (!status) throw new Error("ClickHouse generation status unreachable; retained data preserved")
     if (status.status === 200) checkReceipt(await status.json() as Record<string, unknown>, authority, generationBody(intent))
-    else if (status.status === 404) { await replay(intent); await postGeneration(input,authority,intent) }
+    else if (status.status === 404) {
+      if (!(await segmentsReady(root, intent))) {
+        // The receipt is absent and the bodies are gone (released after a
+        // verified backup, or an incomplete stale staging). Replay is
+        // impossible by design; the generation is already checkpointed here
+        // and its bytes were proven present in ClickHouse at release time.
+        // Skip loudly instead of wedging every future pass.
+        console.error(`recovery deferred for ${intent.source_id}/${intent.file_id}: receipt absent, bodies released or incomplete`)
+        continue
+      }
+      await replay(intent); await postGeneration(input,authority,intent)
+    }
     else throw new Error(`ClickHouse generation status HTTP ${status.status}; retained data preserved`)
   }
   // Verify only lineage leaves, not every prefix: leaf reconstruction checks

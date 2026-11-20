@@ -105,7 +105,7 @@ async function send(root: string, id: string, input: { endpoint: string; token: 
     method: "PUT", headers: { Authorization: `Bearer ${input.token}`, "content-type": "application/octet-stream", "content-length": String(data.length),
       "x-vcc-source-id": meta.source.id, "x-vcc-source-kind": meta.source.kind, "x-vcc-source-locator": meta.source.locator,
       "x-vcc-path": meta.sourcePath, "x-vcc-start": String(meta.start), "x-vcc-full": String(meta.full), "x-vcc-sha256": meta.sha256 },
-    body: data, signal: input.signal ?? AbortSignal.timeout(120_000),
+    body: data, signal: input.signal ?? AbortSignal.timeout(600_000),
   })
   if (!response.ok) throw new Error(`ClickHouse sync HTTP ${response.status}; durable outbox retained`)
   const receipt = await response.json() as Record<string, unknown>

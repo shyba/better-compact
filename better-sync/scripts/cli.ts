@@ -503,8 +503,8 @@ async function acquireSyncLock(action: string): Promise<{ release: () => Promise
  * once migrated, store is clickhouse and this probe never runs again.
  * BETTER_SYNC_NO_AUTO_MIGRATE=1 disables it for a host. */
 async function maybeMigrateStoreToClickHouse(config: Awaited<ReturnType<typeof loadConfig>>, allowInsecureRemote?: boolean): Promise<void> {
-  if (config.sync.transport !== "s3" || config.sync.store !== "s3") { console.error("migrate: skip store/transport"); return }
-  if (process.env.BETTER_SYNC_NO_AUTO_MIGRATE === "1") { console.error("migrate: skip no-auto"); return }
+  if (config.sync.transport !== "s3" || config.sync.store !== "s3") return
+  if (process.env.BETTER_SYNC_NO_AUTO_MIGRATE === "1") return
   const legacy = s3EndpointFor(config)
   if (!legacy || !/^https?:\/\//.test(legacy)) return
   const parsed = new URL(legacy)
