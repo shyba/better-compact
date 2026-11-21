@@ -55,7 +55,7 @@ def handler(store, token, spool_dir):
                                           'max_segment_bytes':MAX_BYTES,'receipt':'committed_segment',
                                           'generation_protocol':1,'generation_status_protocol':1})
                 if url.path=='/health' and self.command=='GET':
-                    return self.reply(200,{'ok':True,'store':'clickhouse','authority_id':store.authority()})
+                    return self.reply(200,{'ok':True,'store':'clickhouse','authority_id':authority})
                 if url.path=='/manifest' and self.command=='GET':
                     source=parse_qs(url.query).get('source',[''])[0]
                     return self.reply(200,{'source':source,'files':store.inventory(source),
