@@ -18,7 +18,7 @@ from store import Store, Conflict, metadata
 MAX_BYTES=64*1024*1024
 
 
-def handler(store, token, spool_dir):
+def handler(store, token, spool_dir, authority):
     slots=threading.BoundedSemaphore(2)
     class Handler(BaseHTTPRequestHandler):
         protocol_version='HTTP/1.1'
