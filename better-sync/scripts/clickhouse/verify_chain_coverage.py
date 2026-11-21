@@ -88,14 +88,36 @@ def run(root,backup_state,outroots):
             tables=', '.join(f'TABLE `{db}`.`{key}` AS `{db}`.`{name}`' for key,name in names.items())
             params={'dest':backup['destination'],'access':os.environ['S3_ACCESS_KEY'],'secret':os.environ['S3_SECRET_KEY']}
             submit(client,state,path,f'RESTORE {tables} FROM S3(%(dest)s,%(access)s,%(secret)s) SETTINGS id=%(id)s ASYNC',params,'restore','RESTORED')
-            covered=0
+            covered=0;transient_failures=0
+            import clickhouse_driver.errors as cherrors
             for intent in intents:
-                try:
-                    inspect_metadata(client,names,intent)
-                    state['results'].append({'file_id':intent['file_id'],'status':'chain_covered_references'});covered+=1
-                except ValueError as exc:
-                    state['results'].append({'file_id':intent.get('file_id'),'status':'not_covered','reason':str(exc)[:200]})
+                ok=False;last_error=None
+                # The fleet flood saturates the server's 8-simultaneous-query
+                # cap; contention is transient and must be retried, not
+                # misreported as lost coverage.
+                for attempt in range(4):
+                    try:
+                        inspect_metadata(client,names,intent);ok=True;break
+                    except cherrors.ServerException as exc:
+                        if 'Too many simultaneous queries' not in str(exc):raise
+                        last_error=exc;time.sleep(20*(attempt+1))
+                    except OSError as exc:
+                        last_error=exc;time.sleep(15)
+                if ok:
+                    covered+=1
+                    state['results'].append({'file_id':intent['file_id'],'status':'chain_covered_references'})
+                else:
+                    transient_failures+=1
+                    state['results'].append({'file_id':intent.get('file_id'),'status':'transient_failure','reason':str(last_error)[:200]})
                 save(path,state)
+            if transient_failures:
+                state.update(phase='error',finished_at=time.time(),covered=covered,total=len(intents),
+                             transient_failures=transient_failures,
+                             chunk_bytes_status='unknown_pending_capacity_verified_full_restore')
+                save(path,state)
+                print(json.dumps({'phase':'error','covered_references':covered,'total':len(intents),
+                                  'transient_failures':transient_failures,'backup_id':backup['id']}),flush=True)
+                return 1
             state.update(phase='completed',finished_at=time.time(),covered=covered,total=len(intents),
                          chunk_bytes_status='unknown_pending_capacity_verified_full_restore')
             save(path,state)
