@@ -152,6 +152,13 @@ The checkboxes describe work to be completed, not work already done.
   line each). Remaining operator items unchanged: physical access per host,
   the 451 MiB file bound, retention deletion decision, 598 upgrade optional
   (same-rack insurance posture).
+- 2026-11-21 (follow-up): the retired vcc-load.service kept being revived by
+  `bm25-refresh.service`/`rag-dense.service` (`Wants=vcc-load` — their PG data
+  dependency is now maintained by the projector, not the loader). The Wants
+  dependency was removed from both units (After= ordering retained) and the
+  loader stopped; it no longer auto-revives. Rollback if ever needed:
+  restore the Wants lines + systemctl start. The fleet pipeline guard's
+  semantics updated to require ALL retired legacy units inactive.
 - 2026-11-21: LEGACY PIPELINE DECOMMISSIONED on the server host, after
   verifying zero traffic for days (loader re-verifying old batches with 0 new
   blocks; no :4175 connections). Stopped + disabled: vcc-load.service,
