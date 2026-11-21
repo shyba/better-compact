@@ -154,7 +154,18 @@ def run(root, full=False, acknowledge_restart=False):
                 state['heartbeat_at']=time.time()
                 save(state_path,state)
             while True:
-                status=poll(client,job['id'],observed)
+                try:
+                    status=poll(client,job['id'],observed)
+                except BackupFailed:
+                    raise
+                except Exception as exc:
+                    # Poll failures (Code 202 contention, dropped connections
+                    # during the weekly full's own S3 traffic) do not affect
+                    # the server-side job: note liveness, wait, resume.
+                    state['heartbeat_at']=time.time()
+                    save(state_path,state)
+                    print(json.dumps({'poll_retry':type(exc).__name__,'detail':str(exc)[:140]}),flush=True)
+                    time.sleep(30);continue
                 if status=='BACKUP_CREATED':
                     job['finished_at']=time.time()
                     state['successful'].append(job)
