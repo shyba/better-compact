@@ -218,11 +218,19 @@ export async function drainGenerations(input: { endpoint: string; token: string;
 
 async function generationRawVerified(input: Destination, authority: Authority, intent: GenerationIntent): Promise<boolean> {
   const item = { source_id: intent.source_id, file_id: intent.file_id, path: intent.path, size: intent.size, sha256: intent.sha256 }
-  const response = await fetch(`${input.endpoint.replace(/\/$/, "")}/verify`, {
-    method: "POST", headers: { Authorization: `Bearer ${input.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ files: [item] }), signal: input.signal ?? AbortSignal.timeout(600_000),
-  })
-  if (!response.ok) throw new Error(`ClickHouse generation verification HTTP ${response.status}; retained data preserved`)
+  // /verify allows one verification at a time fleet-wide; concurrent senders
+  // reconciling after the update-channel migration legitimately contend.
+  // 429/503 are retry-later signals, not failures.
+  let response: Response | undefined
+  for (let attempt = 0; attempt < 24; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 20_000))
+    response = await fetch(`${input.endpoint.replace(/\/$/, "")}/verify`, {
+      method: "POST", headers: { Authorization: `Bearer ${input.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ files: [item] }), signal: input.signal ?? AbortSignal.timeout(600_000),
+    })
+    if (response.status !== 429 && response.status !== 503) break
+  }
+  if (!response || !response.ok) throw new Error(`ClickHouse generation verification HTTP ${response?.status ?? 0}; retained data preserved`)
   const result = await response.json() as { store?: unknown; authority_id?: unknown; files?: Array<{ file_id?: unknown; archive?: { status?: unknown } }> }
   if (result.store !== "clickhouse" || result.authority_id !== authority.authority_id || result.files?.length !== 1 ||
       result.files[0]?.file_id !== intent.file_id || typeof result.files[0]?.archive?.status !== "string") {

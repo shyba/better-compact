@@ -9,7 +9,7 @@ import hashlib
 import re
 
 CHUNK_BYTES = 256 * 1024
-MAX_VERIFY_BYTES = 256 * 1024 * 1024
+MAX_VERIFY_BYTES = 1024 * 1024 * 1024  # 2026-11-21: raised for the 451 MiB fleet rollout file; verify is streaming/bounded-memory, commit time ~minutes
 MAX_SEGMENTS = 4096
 MAX_VERSIONS = 4096
 

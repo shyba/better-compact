@@ -152,6 +152,20 @@ The checkboxes describe work to be completed, not work already done.
   line each). Remaining operator items unchanged: physical access per host,
   the 451 MiB file bound, retention deletion decision, 598 upgrade optional
   (same-rack insurance posture).
+- 2026-11-20 (late): FLEET HOST LIVE; sender resilience fixes. A fleet host
+  (LAN 192.168.0.32, hostname `access`) auto-migrated via the update channel
+  and is committing its codex sessions under source 576278fd…: 765 distinct
+  paths and climbing (its root holds May-2026 history this host never had);
+  paths do not overlap this host's 481, so per-path generation identity holds.
+  The codex projector picks its new paths up automatically (cursor 0 →
+  whole-file, codex dialect). Two resilience fixes shipped (b859a59):
+  reconcile retries transient receiver statuses with backoff instead of
+  aborting every pass, and verify/replay/generation timeouts went 120s →
+  600s — the receiver serves heavy lineages (the 44 MiB pi session, fleet
+  codex flood) slower than the old 120 s allowed, which surfaced as
+  503/socket-close loops that stalled passes. Also: receiver read-only
+  endpoints (/generation/status, /manifest) no longer consume the
+  single-flight slot; a stale 3-week-old git index.lock removed.
 - 2026-11-19: FLEET ROLLOUT SERVER SIDE COMPLETE. Discovery: this host IS
   192.168.0.31 (the MinIO host — same-machine backups); LAN neighbors include
   192.168.0.107 (SSH open, session-history evidence `--home-user-107-writer--`),
