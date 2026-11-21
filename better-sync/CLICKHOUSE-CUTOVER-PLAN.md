@@ -152,6 +152,19 @@ The checkboxes describe work to be completed, not work already done.
   line each). Remaining operator items unchanged: physical access per host,
   the 451 MiB file bound, retention deletion decision, 598 upgrade optional
   (same-rack insurance posture).
+- 2026-11-21: LEGACY PIPELINE DECOMMISSIONED on the server host, after
+  verifying zero traffic for days (loader re-verifying old batches with 0 new
+  blocks; no :4175 connections). Stopped + disabled: vcc-load.service,
+  session-center-s3-sync.service (the :4175 legacy receiver — port closed),
+  vcc-feed-pi/codex (already), and this host's own better-compact-sync.service
+  (its legacy s3-store role is superseded by the pilots; its ClickHouse
+  consolidation requires adopting the pilots' state — a fresh state would
+  collide with existing generation chains, since file_ids are
+  path-deterministic). ROLLBACK for every retired unit = systemctl start;
+  units and configs are preserved untouched. Active fleet senders: pilot
+  daemons (pi + codex) on this host and the fleet host `access`
+  (192.168.0.32) via the update channel. Consolidating this host's
+  better-compact install onto the pilots' state is optional polish.
 - 2026-11-20 (late): FLEET HOST LIVE; sender resilience fixes. A fleet host
   (LAN 192.168.0.32, hostname `access`) auto-migrated via the update channel
   and is committing its codex sessions under source 576278fd…: 765 distinct
