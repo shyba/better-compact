@@ -46,12 +46,18 @@ def handler(store, token, spool_dir, authority):
             given=self.headers.get('authorization','')
             if not hmac.compare_digest(given.encode(),('Bearer '+token).encode()):
                 return self.reply(401,{'error':'bearer token required'})
-            if not slots.acquire(blocking=False):
-                return self.reply(429,{'error':'receiver busy; retain outbox and retry'})
+            url=urlsplit(self.path)
+            # read-only identity/health endpoints do not touch the store and
+            # must never 429 a starting client's discovery.
+            read_only=url.path in ('/capabilities','/health','/generation/status','/manifest')
+            acquired=False
+            if not read_only:
+                if not slots.acquire(blocking=False):
+                    return self.reply(429,{'error':'receiver busy; retain outbox and retry'})
+                acquired=True
             try:
-                url=urlsplit(self.path)
                 if url.path=='/capabilities' and self.command=='GET':
-                    return self.reply(200,{'store':'clickhouse','protocol':1,'authority_id':store.authority(),
+                    return self.reply(200,{'store':'clickhouse','protocol':1,'authority_id':authority,
                                           'max_segment_bytes':MAX_BYTES,'receipt':'committed_segment',
                                           'generation_protocol':1,'generation_status_protocol':1})
                 if url.path=='/health' and self.command=='GET':
@@ -72,7 +78,7 @@ def handler(store, token, spool_dir, authority):
                     result=store.generation_status(item['source_id'],item['file_id'])
                     if result is None:
                         return self.reply(404,{'error':'generation receipt absent'})
-                    return self.reply(200,{'store':'clickhouse','authority_id':store.authority(),
+                    return self.reply(200,{'store':'clickhouse','authority_id':authority,
                                            'committed':True,**result})
                 if url.path=='/generation' and self.command=='POST':
                     if self.headers.get('transfer-encoding'):
@@ -83,7 +89,7 @@ def handler(store, token, spool_dir, authority):
                     item=json.loads(self.rfile.read(length))
                     receipt=store.commit_generation(item)
                     receipt['store']='clickhouse'
-                    receipt['authority_id']=store.authority()
+                    receipt['authority_id']=authority
                     return self.reply(201,receipt)
                 if url.path=='/verify' and self.command=='POST':
                     if self.headers.get('transfer-encoding'):
@@ -98,7 +104,7 @@ def handler(store, token, spool_dir, authority):
                     item=files[0]
                     raw=store.verify_raw(item)
                     unknown=lambda reason: {'status':'unknown','reason':reason}
-                    return self.reply(200,{'store':'clickhouse','authority_id':store.authority(),
+                    return self.reply(200,{'store':'clickhouse','authority_id':authority,
                         'files':[{'file_id':item['file_id'],'archive':raw,
                                   'backup':unknown('backup inclusion has not been independently verified'),
                                   'loaded':unknown('ClickHouse projection handoff is not implemented'),
@@ -133,7 +139,7 @@ def handler(store, token, spool_dir, authority):
                         raise ValueError('upload SHA256 mismatch')
                     spool.seek(0)
                     receipt=store.commit(meta,spool)
-                receipt['authority_id']=store.authority()
+                receipt['authority_id']=authority
                 return self.reply(201,receipt)
             except Conflict as exc:
                 self.reply(409,{'error':str(exc)})
@@ -144,7 +150,8 @@ def handler(store, token, spool_dir, authority):
             except Exception:
                 # Do not leak SQL, credentials or private source paths.
                 self.reply(503,{'error':'store unavailable; retain outbox and retry'})
-            finally:slots.release()
+            finally:
+                if acquired: slots.release()
     return Handler
 
 
@@ -164,8 +171,10 @@ def main():
     # The in-process writer mutex is insufficient if a second receiver starts
     # on another port. Hold one kernel lock for this authority for the life of
     # the process. Distributed/multi-user deployments still need coordination.
+    class Server(ThreadingHTTPServer):
+        request_queue_size = 64  # fleet senders + probes: the default backlog of 5 dropped accepts under load
     with authority_lock(authority):
-        server=ThreadingHTTPServer((args.host,args.port),handler(store,token,args.spool))
+        server=Server((args.host,args.port),handler(store,token,args.spool,authority))
         server.daemon_threads=True
         server.serve_forever()
 
