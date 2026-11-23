@@ -1,0 +1,22 @@
+[Unit]
+Description=better-sync ClickHouse committed-segment receiver
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/better-sync/clickhouse.env
+# Fleet senders upload 64 MiB segments and verify in 32-chunk batches; CPython
+# arena growth can push RSS into the low GiB range over days of traffic. Size
+# the cgroup for that, and cap malloc arenas so long-lived threads do not each
+# grow one. MemoryHigh throttling slows allocation for every request, including
+# /health, so leave real headroom below MemoryMax.
+Environment=MALLOC_ARENA_MAX=2
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -u /pg-hot/data/better-sync/runtime/clickhouse/receiver.py --host 0.0.0.0 --port 4176 --spool /pg-hot/data/better-sync/spool --blob-table archive_migration_v1_chunks
+Restart=always
+RestartSec=5
+MemoryHigh=5G
+MemoryMax=6G
+
+[Install]
+WantedBy=default.target

@@ -152,6 +152,17 @@ The checkboxes describe work to be completed, not work already done.
   line each). Remaining operator items unchanged: physical access per host,
   the 451 MiB file bound, retention deletion decision, 598 upgrade optional
   (same-rack insurance posture).
+- 2026-11-22: Receiver latency/stability incident closed. `pipeline-health`
+  alerted `receiver_down` twice while the unit was up: (a) `/health` and
+  `/capabilities` queried ClickHouse per request and queued behind the weekly
+  full's own traffic (now served from the boot-cached authority, ~1 ms);
+  (b) listen backlog was Python's default 5, dropping accepts under fleet load
+  (now 64, verified with 10 parallel probes); (c) RSS had reached 2.7 GiB
+  against a 3 GiB cap after 1.5 days, so MemoryHigh throttling slowed every
+  allocation including `/health` (now MemoryHigh 5G / MemoryMax 6G plus
+  MALLOC_ARENA_MAX=2; fresh RSS 72 MiB; sampled /health 0.5–1.1 ms). The probe
+  now retries 4× over ~30 s before declaring an outage, so a single slow accept
+  is not an alert. Receiver unit example added with these settings.
 - 2026-11-21 (follow-up): the retired vcc-load.service kept being revived by
   `bm25-refresh.service`/`rag-dense.service` (`Wants=vcc-load` — their PG data
   dependency is now maintained by the projector, not the loader). The Wants
