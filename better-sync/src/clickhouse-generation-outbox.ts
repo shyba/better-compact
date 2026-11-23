@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { link, mkdir, open, readdir, readFile, rename, unlink } from "node:fs/promises"
+import { link, mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { clickHouseOutboxStats, outboxDirectory, replayClickHouseSegment, type Authority } from "./clickhouse-sync.js"
 
@@ -216,6 +216,20 @@ export async function drainGenerations(input: { endpoint: string; token: string;
   return { pending, applied }
 }
 
+/** Cheap receipt probe: indexed lookup, no chunk reads. true = receipt present
+ * and identical; false = absent (needs replay); throws on invalid responses. */
+async function generationReceiptPresent(input: Destination, authority: Authority, intent: GenerationIntent): Promise<boolean> {
+  const response = await fetch(`${input.endpoint.replace(/\/$/, "")}/generation/status`, {
+    method: "POST", headers: { Authorization: `Bearer ${input.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ source_id: intent.source_id, file_id: intent.file_id }),
+    signal: input.signal ?? AbortSignal.timeout(60_000),
+  })
+  if (response.status === 404) return false
+  if (!response.ok) throw new Error(`ClickHouse generation status HTTP ${response.status}; retained data preserved`)
+  checkReceipt(await response.json() as Record<string, unknown>, authority, generationBody(intent))
+  return true
+}
+
 async function generationRawVerified(input: Destination, authority: Authority, intent: GenerationIntent): Promise<boolean> {
   const item = { source_id: intent.source_id, file_id: intent.file_id, path: intent.path, size: intent.size, sha256: intent.sha256 }
   // /verify allows one verification at a time fleet-wide; concurrent senders
@@ -243,6 +257,27 @@ async function generationRawVerified(input: Destination, authority: Authority, i
  * Never delete outbox data: a missing receipt or failed raw verification is
  * repaired by replaying checksum-validated retained segments, then reverified.
  * This is not backup-inclusion proof and does not release any local bytes. */
+/** Leaves re-verified per recovery pass. Each verification reads the whole
+ * file's chunks from ClickHouse, so the budget is deliberately small; the
+ * cursor persists in the outbox root and wraps, giving full coverage over
+ * successive passes without continuous archive saturation. */
+const RAW_VERIFY_PER_PASS = 16
+
+async function rotatedLeaves(root: string, leaves: Array<{ intent: GenerationIntent }>, limit: number): Promise<Set<string>> {
+  const keys = leaves.map(({ intent }) => versionKey(intent.source_id, intent.file_id)).sort()
+  if (keys.length <= limit) return new Set(keys)
+  const cursorPath = path.join(root, "verify-cursor.json")
+  let after = ""
+  try { after = String((JSON.parse(await readFile(cursorPath, "utf8")) as { after?: unknown }).after ?? "") } catch {}
+  const start = after ? keys.findIndex(key => key > after) : 0
+  const ordered = start < 0 ? keys : [...keys.slice(start), ...keys.slice(0, start)]
+  const selected = ordered.slice(0, limit)
+  const temporary = `${cursorPath}.tmp-${process.pid}`
+  await writeFile(temporary, JSON.stringify({ after: selected[selected.length - 1] }), { mode: 0o600 })
+  await rename(temporary, cursorPath)
+  return new Set(selected)
+}
+
 export async function reconcileAppliedGenerations(input: Destination, authority: Authority): Promise<{ checked: number; repaired: number }> {
   if (authority.generation_status_protocol !== 1) throw new Error("ClickHouse receiver lacks generation recovery protocol")
   const root = outboxDirectory(authority)
@@ -298,9 +333,24 @@ export async function reconcileAppliedGenerations(input: Destination, authority:
   // Verify only lineage leaves, not every prefix: leaf reconstruction checks
   // each intermediate hash. This avoids quadratic full-file re-reads on long
   // append chains. Full rewrites are separate roots and remain separate leaves.
+  //
+  // Raw verification reads every chunk of the file from ClickHouse. Verifying
+  // every leaf on every pass turned recovery into tens of MiB/s of archive
+  // reads (7.7 GiB of fleet sessions per 5-minute pass). Missing receipts are
+  // still handled immediately and cheaply; chunk-loss detection for present
+  // receipts rotates through a bounded slice of leaves per pass, so a full
+  // sweep still completes (and still catches a restored DB that lost chunks).
   const parents = new Set(applied.flatMap(({intent}) => intent.parent === null ? [] : [versionKey(intent.source_id,intent.parent)]))
+  const leaves = applied.filter(({intent}) => !parents.has(versionKey(intent.source_id,intent.file_id)))
+  const rotate = await rotatedLeaves(root, leaves, RAW_VERIFY_PER_PASS)
   for (const { intent } of applied) {
     if (parents.has(versionKey(intent.source_id,intent.file_id))) continue
+    const present = await generationReceiptPresent(input, authority, intent)
+    if (present === false) {
+      // absent receipt: replay immediately, regardless of rotation
+    } else if (!rotate.has(versionKey(intent.source_id,intent.file_id))) {
+      continue
+    }
     if (await generationRawVerified(input,authority,intent)) continue
     const chain: GenerationIntent[] = []
     let cursor: GenerationIntent | undefined = intent

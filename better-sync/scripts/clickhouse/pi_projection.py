@@ -104,6 +104,15 @@ def project_generation(client, blobs, loader, vcc, pg, pgcur, fsid, kind, locato
                        generation, spool_dir, dry_run, a_replace=False):
     rel = generation['path']
     path = locator.rstrip('/') + '/' + rel  # production stores absolute paths
+    # Cheap checks first: reconstructing a generation reads every chunk of the
+    # file from ClickHouse. Doing that before the cursor check turned each idle
+    # pass into a full re-read of `leaf_limit` files (tens of MiB/s of archive
+    # reads on an HDD for zero progress).
+    cursor = file_state(pgcur, fsid, path)
+    if generation['size'] < cursor:
+        return {'path': path, 'status': 'behind_cursor', 'blocks': 0}
+    if generation['size'] == cursor and not a_replace:
+        return {'path': path, 'status': 'already_current', 'blocks': 0}
     raw = reconstruct(client, '`archive_migration_v1_chunks`', generation, spool_dir)
     records, _pending, offset = complete_records(generation['source_id'], generation['file_id'], 0, raw)
     if _pending:
@@ -116,15 +125,10 @@ def project_generation(client, blobs, loader, vcc, pg, pgcur, fsid, kind, locato
         value['_ln'] = index + 1
         value.setdefault('ordinal', None)
         parsed.append(value)
-    cursor = file_state(pgcur, fsid, path)
     existing_session = None
     pgcur.execute('select session_id from vcc.session where source_id=%s and path=%s order by created_at desc nulls last, session_id limit 1', (fsid, path))
     row = pgcur.fetchone()
     if row: existing_session = row[0]
-    if generation['size'] < cursor:
-        return {'path': path, 'status': 'behind_cursor', 'blocks': 0}
-    if generation['size'] == cursor and not a_replace:
-        return {'path': path, 'status': 'already_current', 'blocks': 0}
     delta = cursor > 0 and kind in ('codex-jsonl', 'codex-jsonl-sessions')
     if delta:
         # Continuation of the loader's frame-wise semantics: compile only the
